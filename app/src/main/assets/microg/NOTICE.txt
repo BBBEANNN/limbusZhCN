@@ -1,0 +1,17 @@
+Bundled microG components
+
+Source project: https://github.com/microg/GmsCore
+License: Apache License 2.0 (see ../licenses/microG-Apache-2.0.txt)
+
+- microG Services
+  Package: com.google.android.gms
+  Version: 0.3.15.250932 (250932030)
+  SHA-256: 52597e77fd25fdd347574d0457ed1936a4b9561cf4c8d34e7ac8dd8191dfd4b9
+
+- microG Companion / FakeStore
+  Package: com.android.vending
+  Version: 0.3.15.40226 (84022630)
+  SHA-256: a973e0235a2829773a4faf36d235d5f703d1c04a2adff674ebaa535a2e78f937
+
+Both APKs use the microG/NOGAPPS signing certificate with SHA-256 digest:
+9bd06727e62796c0130eb6dab39b73157451582cbd138e86c468acc395d14165

@@ -1,0 +1,57 @@
+*.iml
+.gradle
+/local.properties
+.idea/
+.DS_Store
+/build
+/app/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Claude Code 本地状态
+.claude/
+
+# 译文制作产物（不进入仓库）
+/baseline/
+/out/
+/dist/
+*.tmp.json
+
+# 本地运行诊断与逆向分析产物
+/.diagnostics/
+/analysis_artifacts/
+/logs/
+/limbus_*.png
+
+# 根目录设备诊断、截图与提取出的运行文件
+/*.log
+/*.err.log
+/device-window.xml
+/android16-*.png
+/android16-*.jar
+/android16-*.so
+/libcovault*.so
+/*.apk
+/*.aab
+/*.dex
+
+# Gradle 构建目录之外的本地编译器缓存
+/.kotlin/
+
+# 本地 APK 签名材料（严禁提交私钥或密码）
+/signing/
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+**/keystore.properties
+
+# 环境变量文件与服务凭据
+.env
+.env.*
+!.env.example
+**/google-services.json

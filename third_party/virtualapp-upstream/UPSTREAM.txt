@@ -1,0 +1,6 @@
+Repository: https://github.com/ServenScorpion/VirtualApp.git
+Revision: ae7c4275096b6614fa1aa7befe326630fd3f8833
+Vendored by: scripts/vendor_virtualapp.sh
+
+Only the upstream lib module and root Gradle config files are copied.
+The demo app module is intentionally excluded.

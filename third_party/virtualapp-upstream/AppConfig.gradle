@@ -1,0 +1,90 @@
+allprojects {
+    repositories {
+        maven { url 'https://jitpack.io' }
+        google()
+        mavenCentral()
+        maven {
+            url 'https://maven.aliyun.com/nexus/content/groups/public/'
+        }
+        maven {
+            url 'https://maven.aliyun.com/nexus/content/repositories/jcenter'
+        }
+    }
+}
+
+subprojects {
+
+    afterEvaluate {
+        def isAndroidProject = project.plugins.hasPlugin('android')
+        def isLibraryProject = project.plugins.hasPlugin('android-library')
+
+        if (isAndroidProject || isLibraryProject) {
+            android {
+                compileSdkVersion 33
+                //buildToolsVersion '30.0.1'
+
+                compileOptions {
+                    sourceCompatibility JavaVersion.VERSION_1_8
+                    targetCompatibility JavaVersion.VERSION_1_8
+                }
+
+                if (new File(projectDir, "src/main/cpp/CMakeLists.txt").exists()) {
+                    externalNativeBuild {
+                        cmake {
+                            path "src/main/cpp/CMakeLists.txt"
+                        }
+                    }
+                }
+
+                defaultConfig {
+                    minSdkVersion 21
+                    //noinspection OldTargetApi
+                    targetSdkVersion 26
+
+                    versionCode rootProject.ext.VA_VERSION_CODE
+                    versionName rootProject.ext.VA_VERSION
+                }
+
+                lintOptions {
+                    checkReleaseBuilds false
+                    abortOnError false
+                }
+            }
+        }
+
+        if (isAndroidProject) {
+            android {
+                signingConfigs {
+                    va {
+                        storeFile       file(rootProject.ext.signing_storeFile)
+                        storePassword   rootProject.ext.signing_storePassword
+                        keyAlias        rootProject.ext.signing_keyAlias
+                        keyPassword     rootProject.ext.signing_keyPassword
+                    }
+                }
+
+                buildTypes {
+                    release {
+                        signingConfig signingConfigs.va
+                        minifyEnabled true
+                        shrinkResources true
+                        zipAlignEnabled true
+                        proguardFiles getDefaultProguardFile('proguard-android.txt'), "${rootProject.rootDir}/proguard/proguard-rules.pro", "proguard-rules.pro"
+                    }
+
+                    debug {
+                        signingConfig release.signingConfig
+                        crunchPngs false //关闭crunchPng优化
+                        minifyEnabled false
+
+                        //minifyEnabled true    //minifyEnabled为true的作用：启用代码混淆、压缩APK
+                        //shrinkResources true   //shrinkResources为true用来开启删除无用资源
+                        //zipAlignEnabled true   //不开启ZipAlign优化
+
+                        proguardFiles getDefaultProguardFile('proguard-android.txt'), "${rootProject.rootDir}/proguard/proguard-rules.pro", "proguard-rules.pro"
+                    }
+                }
+            }
+        }
+    }
+}

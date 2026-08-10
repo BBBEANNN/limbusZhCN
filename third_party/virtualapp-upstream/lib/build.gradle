@@ -1,0 +1,114 @@
+apply plugin: 'com.android.library'
+
+
+android {
+    namespace 'com.lody.virtual'
+    compileSdkVersion 35
+    ndkVersion '30.0.14904198'
+    defaultConfig {
+        minSdkVersion 23
+        targetSdkVersion 35
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+
+        buildConfigField 'String', 'VA_VERSION_NAME', '"V' + rootProject.ext.VERSION + '"'
+        buildConfigField 'int', 'VERSION_CODE', '' + rootProject.ext.VERSION_CODE
+
+        if (project.hasProperty('commit')) {
+            buildConfigField 'String', 'commit', '"' + commit + '"'
+        } else {
+            buildConfigField 'String', 'commit', '"000000"'
+        }
+
+        manifestPlaceholders = [
+                PERMISSION_PREFIX:  rootProject.ext.PACKAGE_NAME_32BIT,
+                AUTHORITY_PREFIX :  rootProject.ext.PACKAGE_NAME_32BIT,
+                VA_VERSION       : '' + rootProject.ext.VERSION_CODE,
+        ]
+    }
+
+    buildTypes {
+        debug {
+            // 与宿主 DEBUGGABLE 状态保持一致，避免打包 gdb 调试元数据改变 AppSealing 的
+            // 原生环境判定；native 故障继续通过受限日志和信号现场采集定位。
+            jniDebuggable false
+        }
+        release {
+            minifyEnabled false
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    buildFeatures {
+        buildConfig true
+        aidl true
+    }
+    externalNativeBuild {
+        ndkBuild {
+            path 'src/main/jni/Android.mk'
+        }
+    }
+    lint {
+        //IJobService need NewApi
+        abortOnError false
+        warning 'NewApi', 'OnClick', 'EllipsizeMaxLines'
+    }
+}
+
+gradle.taskGraph.afterTask { task ->
+    def TASK_NAME = "transformNativeLibsWithStripDebugSymbolFor"
+    def COPY_ABI_LIST = [
+            "lib/armeabi/",
+            "lib/armeabi-v7a/",
+    ]
+
+    def COPY_FOR_HOUDINI_ABI_LIST = [
+            "lib/x86/"
+    ]
+    if (task.name.startsWith(TASK_NAME)) {
+        println("performing lib64 transforming...")
+        String buildType = task.name.substring(TASK_NAME.length()).toLowerCase(Locale.US)
+        File root = new File(buildDir, "intermediates/transforms/stripDebugSymbol/${buildType}")
+        // 0\lib\arm64-v8a
+        for (File numberDir : root.listFiles()) {
+            if (!numberDir.isDirectory()) {
+                continue
+            }
+            File soDir = new File(numberDir, "lib/arm64-v8a")
+            for (File soFile : soDir.listFiles()) {
+                if (soFile.name.endsWith("_64.so")) {
+                    for (String abi : COPY_ABI_LIST) {
+                        def toFile = new File(numberDir, abi + soFile.name)
+                        GFileUtils.copyFile(soFile, toFile)
+                    }
+                    for (String abi : COPY_FOR_HOUDINI_ABI_LIST) {
+                        def toFile = new File(numberDir, abi + soFile.name)
+                        toFile.getParentFile().mkdirs()
+                        toFile.createNewFile()
+                    }
+                    println("copy : " + soFile.path)
+                }
+            }
+            soDir = new File(numberDir, "lib/armeabi-v7a")
+            for (File soFile : soDir.listFiles()) {
+                if (soFile.name.endsWith("v++.so")) {
+                    def toFile = new File(numberDir, "lib/arm64-v8a/" + soFile.name)
+                    GFileUtils.copyFile(soFile, toFile)
+                    println("copy : " + soFile.path)
+                }
+            }
+        }
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation 'androidx.core:core:1.15.0'
+    // Android 16 会拦截原先的系统访问方式；该组件负责在应用启动早期恢复必要访问。
+    implementation 'org.lsposed.hiddenapibypass:hiddenapibypass:6.1'
+    // Compile against the Firebase C++ bridge ABI without packaging a second copy of GMS Task.
+    compileOnly 'com.google.android.gms:play-services-tasks:18.2.0'
+}

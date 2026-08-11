@@ -326,9 +326,12 @@ font so common Han glyphs and Simplified-Chinese-only glyphs do not alternate
 between the Japanese primary face and the fallback. The original font material is
 remembered as well: outline width/color are copied onto the per-component Chinese
 material so coin-skill text retains the game's black edge, and the exact material
-is restored with the original font. Translated multiline text without an explicit
-`line-height` tag receives a small line-spacing floor to prevent adjacent CJK rows
-from overlapping. A reused component is restored to its original font, material,
+is restored with the original font. Translated text without an explicit
+`line-height` tag receives a small line-spacing floor before layout. This also
+covers rows created by TMP automatic wrapping; checking only for literal newlines
+left long skill descriptions overlapping. Single-line labels are unaffected
+because line spacing is consumed only between generated rows. A reused component
+is restored to its original font, material,
 and spacing as soon as it receives an untagged string. This
 must not be generalized to every non-ASCII string. A 1024 atlas caused old glyphs
 to disappear after loading a skill screen, so both primary and fallback use the
@@ -337,6 +340,16 @@ unchanged. The fallback is prepared before any non-ASCII TMP text is laid out,
 because a formatter may already have returned Chinese before the setter hook
 runs; relying only on a setter-time replacement would leave the first such screen
 without Chinese-only glyphs.
+
+Translation provenance is retained by exact UTF-8 output content rather than by
+the raw IL2CPP object address alone. Limbus can copy a returned string into a new
+managed object before assigning it to TMP, and address-only tagging then loses the evidence needed
+to select the uniform Chinese primary face. Exact content tracking survives that
+copy while still avoiding a blanket font replacement for native Japanese text.
+Known, reviewed upstream terminology errors are normalized while the index is
+compiled, and a very small built-in term table covers reviewed Japanese condition
+fragments that otherwise degrade into half-Japanese output after shorter terms are
+substituted.
 
 ## Notes
 

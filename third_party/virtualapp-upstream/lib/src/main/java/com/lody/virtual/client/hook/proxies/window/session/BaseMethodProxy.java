@@ -230,6 +230,9 @@ class Relayout extends BaseMethodProxy{
 
 /*package*/ class BaseMethodProxy extends StaticMethodProxy {
 
+    /** Limbus 游戏包名，仅用于限制窗口策略修正范围。 */
+    private static final String LIMBUS_PACKAGE_NAME = "com.ProjectMoon.LimbusCompany";
+
     public BaseMethodProxy(String name) {
         super(name);
     }
@@ -248,6 +251,14 @@ class Relayout extends BaseMethodProxy{
         if (index != -1) {
             WindowManager.LayoutParams attrs = (WindowManager.LayoutParams) args[index];
             if (attrs != null) {
+                if (LIMBUS_PACKAGE_NAME.equals(getAppPkg())
+                        && (attrs.flags & WindowManager.LayoutParams.FLAG_SECURE) != 0) {
+                    // Unity 可能在 Activity 恢复后再次提交窗口参数；必须在 add/relayout
+                    // 到达系统服务前移除安全位，否则系统截图仍会得到黑屏或禁止提示。
+                    attrs.flags &= ~WindowManager.LayoutParams.FLAG_SECURE;
+                    Log.i("LimbusVA", "Removed Limbus FLAG_SECURE from window call="
+                            + method.getName());
+                }
                 attrs.packageName = getHostPkg();
                 switch (attrs.type) {
                     case WindowManager.LayoutParams.TYPE_PHONE:

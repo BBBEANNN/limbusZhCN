@@ -392,6 +392,37 @@
             android:process="@string/engine_process_name"
             android:taskAffinity="com.lody.virtual.pending" />
 
+        <!--
+            游戏内 Firebase Auth Activity 只存在于虚拟 manifest，系统浏览器无法直接回到容器。
+            此跳板仅匹配游戏原 manifest 的精确 URI，并在 Java 层再次校验后转发到 p0。
+        -->
+        <activity
+            android:name=".client.stub.LimbusOAuthRedirectActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter android:priority="2147483647">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:host="firebase.auth"
+                    android:path="/"
+                    android:scheme="genericidp" />
+            </intent-filter>
+            <intent-filter android:priority="2147483647">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:host="firebase.auth"
+                    android:path="/"
+                    android:scheme="recaptcha" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".client.stub.ShadowPendingService"
             android:exported="true"

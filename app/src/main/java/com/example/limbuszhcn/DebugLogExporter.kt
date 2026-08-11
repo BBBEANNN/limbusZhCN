@@ -56,7 +56,8 @@ internal class DebugLogExporter(private val context: Context) {
             val exits = collectExitReasons()
             zip.writeText("process-exits.txt", exits.summary)
             exits.traces.forEachIndexed { index, trace ->
-                zip.writeText("exit-trace-${index + 1}.txt", trace)
+                // Native tombstone 是 protobuf 二进制；按 UTF-8 写回会破坏地址和字段长度。
+                zip.writeBytes("exit-trace-${index + 1}.pb", trace.bytes)
             }
         }
         require(output.length() <= MAX_ARCHIVE_BYTES) {
@@ -170,7 +171,7 @@ internal class DebugLogExporter(private val context: Context) {
                 traces = emptyList()
             )
         }
-        val traces = mutableListOf<String>()
+        val traces = mutableListOf<ExitTrace>()
         val summary = buildString {
             appendLine("count=${reasons.size}")
             reasons.forEachIndexed { index, reason ->
@@ -185,17 +186,17 @@ internal class DebugLogExporter(private val context: Context) {
                 appendLine("rssKb=${reason.rss}")
                 appendLine("description=${reason.description.orEmpty()}")
                 if (traces.size < MAX_EXIT_TRACES) {
-                    runCatching {
+                    val trace = runCatching {
                         reason.traceInputStream?.use { trace ->
-                            String(trace.readBounded(MAX_EXIT_TRACE_BYTES), Charsets.UTF_8)
+                            trace.readBinaryAtMost(MAX_EXIT_TRACE_BYTES)
                         }
-                    }.getOrNull()?.takeIf(String::isNotBlank)?.let { trace ->
-                        traces += buildString {
-                            appendLine("process=${reason.processName}")
-                            appendLine("timestamp=${Instant.ofEpochMilli(reason.timestamp)}")
-                            append(trace)
-                        }.redactedAndBounded(MAX_EXIT_TRACE_BYTES)
-                        appendLine("traceFile=exit-trace-${traces.size}.txt")
+                    }.getOrNull()
+                    if (trace?.exceededLimit == true) {
+                        // 截断 protobuf 会得到无法解析的假栈，因此超限时只在摘要中说明。
+                        appendLine("traceSkipped=exceeds-${MAX_EXIT_TRACE_BYTES}-bytes")
+                    } else if (trace != null && trace.bytes.isNotEmpty()) {
+                        traces += ExitTrace(trace.bytes.redactedBinaryCopy())
+                        appendLine("traceFile=exit-trace-${traces.size}.pb")
                     }
                 }
             }
@@ -206,6 +207,18 @@ internal class DebugLogExporter(private val context: Context) {
     private fun ZipOutputStream.writeText(name: String, text: String) {
         putNextEntry(ZipEntry(name))
         write(text.toByteArray(Charsets.UTF_8))
+        closeEntry()
+    }
+
+    /**
+     * 将已经完成等长脱敏的二进制诊断内容写入 ZIP。
+     *
+     * @param name ZIP 内的条目名称
+     * @param bytes 保持 protobuf 字段边界的二进制内容
+     */
+    private fun ZipOutputStream.writeBytes(name: String, bytes: ByteArray) {
+        putNextEntry(ZipEntry(name))
+        write(bytes)
         closeEntry()
     }
 
@@ -270,6 +283,27 @@ internal class DebugLogExporter(private val context: Context) {
         return output.toByteArray()
     }
 
+    /**
+     * 在不截断二进制格式的前提下读取单项诊断内容。
+     *
+     * @param limit 允许写入诊断包的最大字节数
+     * @return 完整数据及是否超过上限；超限时返回的数据不会被写入 ZIP
+     */
+    private fun InputStream.readBinaryAtMost(limit: Int): BoundedBinary {
+        val output = ByteArrayOutputStream(minOf(limit, DEFAULT_BUFFER_SIZE))
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val count = read(buffer)
+            if (count < 0) {
+                return BoundedBinary(output.toByteArray(), exceededLimit = false)
+            }
+            if (output.size() + count > limit) {
+                return BoundedBinary(ByteArray(0), exceededLimit = true)
+            }
+            output.write(buffer, 0, count)
+        }
+    }
+
     private fun exitReasonName(reason: Int): String = when (reason) {
         ApplicationExitInfo.REASON_ANR -> "ANR"
         ApplicationExitInfo.REASON_CRASH -> "CRASH"
@@ -288,7 +322,11 @@ internal class DebugLogExporter(private val context: Context) {
         else -> "REASON_$reason"
     }
 
-    private data class ExitDiagnostics(val summary: String, val traces: List<String>)
+    private data class ExitDiagnostics(val summary: String, val traces: List<ExitTrace>)
+
+    private data class ExitTrace(val bytes: ByteArray)
+
+    private data class BoundedBinary(val bytes: ByteArray, val exceededLimit: Boolean)
 
     companion object {
         private const val FILE_PREFIX = "limbus-diagnostics-"
@@ -306,11 +344,45 @@ internal class DebugLogExporter(private val context: Context) {
         private val README = """
             Limbus Company 汉化器 Issue 诊断包
 
-            内容：可复制的 Issue 模板、设备兼容信息、应用内滚动日志、本应用 UID 的近期日志、历史进程退出原因。
+            内容：可复制的 Issue 模板、设备兼容信息、应用内滚动日志、本应用 UID 的近期日志、历史进程退出原因，以及等长脱敏的原生 tombstone protobuf。
             不包含：游戏资源、存档、PlayerPrefs、汉化渠道地址、Token 或账号配置。
             文本已经过自动脱敏，但公开上传前仍建议自行检查内容。
         """.trimIndent() + "\n"
     }
+}
+
+/**
+ * 对 protobuf 等二进制内容中的可打印 ASCII 凭据执行等长覆盖。
+ *
+ * <p>只扫描连续可打印 ASCII 区间，避免正则跨过 protobuf 的字段键或长度字节；替换后的
+ * 字节数与原始内容完全一致，因此地址、varint 和嵌套消息边界仍可被标准工具解析。</p>
+ *
+ * @return 保持原长度且已覆盖常见凭据、邮箱和 JWT 的新字节数组
+ */
+internal fun ByteArray.redactedBinaryCopy(): ByteArray {
+    val result = copyOf()
+    var start = 0
+    while (start < result.size) {
+        while (start < result.size && result[start].toInt() !in PRINTABLE_ASCII_RANGE) {
+            start++
+        }
+        var end = start
+        while (end < result.size && result[end].toInt() in PRINTABLE_ASCII_RANGE) {
+            end++
+        }
+        if (end > start) {
+            val segment = String(result, start, end - start, Charsets.US_ASCII)
+            BINARY_SENSITIVE_PATTERNS.forEach { pattern ->
+                pattern.findAll(segment).forEach { match ->
+                    for (relativeIndex in match.range) {
+                        result[start + relativeIndex] = REDACTED_BINARY_BYTE
+                    }
+                }
+            }
+        }
+        start = if (end == start) start + 1 else end
+    }
+    return result
 }
 
 internal fun String.redactedAndBounded(maxBytes: Int): String {
@@ -336,3 +408,12 @@ private val CREDENTIAL_FIELD = Regex(
 private val JWT_VALUE = Regex("(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{16,}\\.[A-Za-z0-9_-]{16,}\\.[A-Za-z0-9_-]{16,}(?![A-Za-z0-9_-])")
 private val EMAIL_ADDRESS = Regex("(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}(?![A-Za-z0-9.-])")
 private val FIREBASE_USER = Regex("(about\\s+user\\s*\\(\\s*)[^)\\r\\n]+(\\s*\\))", RegexOption.IGNORE_CASE)
+private val PRINTABLE_ASCII_RANGE = 0x20..0x7e
+private const val REDACTED_BINARY_BYTE: Byte = 0x2a
+private val BINARY_SENSITIVE_PATTERNS = listOf(
+    URL_CREDENTIAL,
+    CREDENTIAL_FIELD,
+    FIREBASE_USER,
+    JWT_VALUE,
+    EMAIL_ADDRESS
+)

@@ -1,6 +1,8 @@
 package com.example.limbuszhcn
 
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -41,5 +43,25 @@ class DebugLogExporterTest {
 
         assertTrue(result.startsWith("[truncated to recent data]"))
         assertTrue(result.endsWith("RECENT-END"))
+    }
+
+    /** 验证二进制脱敏保持 protobuf 结构字节、总长度和非敏感文本不变。 */
+    @Test
+    fun redactsBinaryCredentialsWithoutChangingFieldBoundaries() {
+        val prefix = byteArrayOf(0x82.toByte(), 0x01, 0x12, 0x20)
+        val secret = "account=user@example.com token=live-secret safe=kept"
+            .toByteArray(Charsets.US_ASCII)
+        val suffix = byteArrayOf(0x80.toByte(), 0x01, 0x7a)
+        val input = prefix + secret + suffix
+
+        val result = input.redactedBinaryCopy()
+
+        assertEquals(input.size, result.size)
+        assertArrayEquals(prefix, result.copyOfRange(0, prefix.size))
+        assertArrayEquals(suffix, result.copyOfRange(result.size - suffix.size, result.size))
+        val printable = String(result, Charsets.ISO_8859_1)
+        assertFalse(printable.contains("user@example.com"))
+        assertFalse(printable.contains("live-secret"))
+        assertTrue(printable.contains("safe=kept"))
     }
 }

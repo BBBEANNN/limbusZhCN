@@ -24,7 +24,8 @@ class TranslationIndexCompilerTest {
         val compiled = compiler.compile("2026071001", "archive")
 
         assertEquals(mapOf("Sinner" to "罪人"), compiled.uniqueEntries)
-        assertEquals(mapOf("Sinner" to "罪人"), compiled.termEntries)
+        assertEquals("罪人", compiled.termEntries["Sinner"])
+        assertEquals("未被破坏且命中时", compiled.termEntries["破壊されずに命中時"])
         assertEquals(4, compiled.sourceRecordCount)
         assertEquals(1, compiled.conflictCount)
         assertEquals(0, compiled.dominantEntryCount)
@@ -95,6 +96,28 @@ class TranslationIndexCompilerTest {
         assertEquals("?!>@!#$@!?!>#!#!", compiled.uniqueEntries["信号"])
     }
 
+    /** 验证已人工确认的术语错译与半日文条件在索引编译时被统一修正。 */
+    @Test
+    fun correctsReviewedTerminologyAndMixedJapaneseConditions() {
+        val compiler = TranslationIndexCompiler().apply {
+            add(record("Skill.json", "breath", "desc", "呼吸を得る", "获得喘息未定强度"))
+            add(record(
+                "Skill.json",
+                "coin-condition",
+                "content",
+                "[破壊されずに命中時]",
+                "[破坏されずに命中时]"
+            ))
+        }
+
+        val compiled = compiler.compile("2026080601", "archive")
+
+        assertEquals("获得呼吸法强度", compiled.uniqueEntries["呼吸を得る"])
+        assertEquals("[未被破坏且命中时]", compiled.uniqueEntries["[破壊されずに命中時]"])
+        assertEquals("未被破坏且命中时", compiled.termEntries["破壊されずに命中時"])
+        assertEquals("未被破坏且命中时", compiled.termEntries["破坏されずに命中时"])
+    }
+
     @Test
     fun activatesImmutableBinaryIndexAndPointer() {
         val root = Files.createTempDirectory("limbus-index-test")
@@ -112,7 +135,7 @@ class TranslationIndexCompilerTest {
             assertEquals("LZTI1\u0000", String(input.readNBytes(6), Charsets.US_ASCII))
             assertEquals(7, input.readInt())
             assertEquals(1, input.readInt())
-            assertEquals(1, input.readInt())
+            assertEquals(3, input.readInt())
             assertEquals("Sinner", input.readSizedUtf8())
             assertEquals("罪人", input.readSizedUtf8())
             assertEquals("Sinner", input.readSizedUtf8())
@@ -122,7 +145,7 @@ class TranslationIndexCompilerTest {
             indexFile.parent.resolve("manifest.properties").inputStream().use(::load)
         }
         assertEquals("1", properties.getProperty("uniqueEntryCount"))
-        assertEquals("1", properties.getProperty("termEntryCount"))
+        assertEquals("3", properties.getProperty("termEntryCount"))
         assertEquals("1", properties.getProperty("sourceRecordCount"))
         assertEquals("0", properties.getProperty("conflictCount"))
     }

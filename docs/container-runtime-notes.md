@@ -30,6 +30,9 @@ VirtualApp 接入状态:
 - AppSealing 当前以稳定 fallback 方式跳过真实 Application,并在 `LimbusVA` 中记录 `sourceDir`、`splitSourceDirs`、`nativeLibraryDir`、`dataDir`、installer、签名数量和关键目录存在性,用于下一轮定位需要伪装的环境项。
 - Android 13/MIUI 上 `Context.getExternalFilesDirs()` 和 `Environment.isExternalStorageRemovable()` 可能通过 `StorageManagerService.getVolumeList` 触发跨用户权限拒绝;VirtualApp IO relocation 必须使用宿主私有合成 TF 根,并把 removable 判断的 `SecurityException` 视为不可判定而非启动失败。`IStorageManager.getVolumeList` 的首个 Binder 参数在 Android 12 及以前是 UID、Android 13 起是 userId;mount hook 必须按系统版本传宿主真实 UID/userId,不得把宿主 UID 当作 Android 13 的 userId。
 - Redmi/Android 13 真机上已确认 `p0` 主 Activity 进程能绑定 Limbus、创建 `UnityPlayerActivity`、绘制 Unity 窗口并隐藏宿主包名;随后 AppSealing 报 `Kill Process [50040]` 并导致 `p0` 被 `SIGKILL` 杀掉。
+- Limbus 游戏窗口不继承上游企业容器的防截屏策略。Activity 恢复时会清除一次
+  `FLAG_SECURE`，窗口会话的 `add/relayout` 参数还会再次按 Limbus 包名移除该位，
+  防止 Unity 或游戏稍后重提窗口参数而重新禁止系统截图；其他虚拟应用仍保留原策略。
 - Redmi/Android 12 真机已确认 Google Play Limbus `v436` 能同步到 VirtualApp 包缓存,`p0` 能加载 `com.inka.appsealing.AppSealingApplication`、挂载 sealed dex 并创建 `UnityPlayerActivity`;随后 AppSealing 报 `Kill Process [50040]`,走 `setitimer` 和 `exit(0)` 后仍在 Activity resume 附近死亡,events 记录为 `am_proc_died ... reason=2`。
 - Limbus arm64 进程因完整 VirtualApp VM hook 会在真实设备上崩溃,当前跳过完整 VM hook,改为安装 Java `Runtime.nativeExit` / `Process.sendSignal` 轻量 hook,并在 native IO hook 中拦截 `exit`、`_exit`、`abort`、`raise`、`kill`、`tkill`、`tgkill`、`pthread_kill`、`syscall(__NR_exit*)`、`syscall(__NR_kill/tkill/tgkill)` 等路径。
 - Limbus native signal guard 只在容器进程内阻断终止类信号: `SIGKILL`、`SIGTERM`、`SIGABRT`、`SIGQUIT`、`SIGTRAP`、`SIGUSR1`、`SIGUSR2`;`SIGALRM` 继续按 AppSealing 计时器路径单独忽略。必须显式放行 `SIGXCPU` / `SIGPWR`: Redmi/Android 12 实测阻断 signal 30 会让 Unity il2cpp 在初始化阶段触发 `abort()`。
@@ -110,6 +113,20 @@ Android 9+ 的 HCallback 可能在 `Instrumentation.newActivity()` 前已经把�
 进程校验 `GetServiceRequest.packageName`，因此只对这一精确虚拟服务保留游戏包名；若仍
 套用通用宿主改写，会返回 `API 17 / DEVELOPER_ERROR`。Measurement、宿主 GMS 和其它未知
 broker 服务继续使用宿主包名，不能把这个例外扩展到整个 microG。
+
+2026-08-11 的 vivo/Android 13 Issue #1 诊断包确认，Google 登录调起的 `:p1/:p2`
+辅助进程在绑定 microG 应用时进入 `libv++_64.so -> hookAndroidVM ->
+NativeEngine.launchEngine()` 并发生同步 `SIGSEGV`。主游戏进程已经因为 AppSealing/ART
+兼容要求跳过旧式 `jmethodID` 内存改写；microG Services 与 FakeStore 同样不依赖该旧 Hook，
+其 IO 重定向会在 `launchEngine()` 前独立完成，Binder 身份和结果链也由 Java 代理维护，
+因此必须对这两个精确包跳过 VM Hook，不能泛化到未知虚拟应用。
+
+同一版本游戏的 Firebase Auth manifest 声明了
+`genericidp://firebase.auth/` 与 `recaptcha://firebase.auth/` 两个浏览器返回入口。游戏 APK
+没有直接安装为汉化器宿主组件，系统浏览器无法把回调解析到容器内 Activity；宿主须声明
+只匹配这两个精确 URI 的导出跳板，丢弃浏览器携带的 component/package/extras，仅保留
+ACTION_VIEW、原始回调 URI 和 BROWSABLE/DEFAULT category，再显式启动容器内
+`GenericIdpActivity` 或 `RecaptchaActivity`。其它 scheme/host/path 一律拒绝。
 
 ### Android 16 资源完成状态持久化
 

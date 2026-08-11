@@ -69,17 +69,21 @@ internal class TranslationIndexCompiler {
      * @param record 待验证的日中显示文本记录。
      */
     fun add(record: TranslationIndexRecord) {
+        // 先统一已经人工确认的错译，确保完整索引、术语索引和输入摘要使用同一份结果。
+        val correctedRecord = record.copy(
+            translation = TranslationTextPolicy.correctKnownTranslation(record.translation)
+        )
         if (
-            !TranslationTextPolicy.isDisplayField(record.field) ||
-            record.source.isBlank() ||
-            record.translation.isBlank() ||
-            record.source == record.translation ||
-            !TranslationTextPolicy.isUsableDisplayText(record.source) ||
-            !TranslationTextPolicy.isUsableDisplayText(record.translation)
+            !TranslationTextPolicy.isDisplayField(correctedRecord.field) ||
+            correctedRecord.source.isBlank() ||
+            correctedRecord.translation.isBlank() ||
+            correctedRecord.source == correctedRecord.translation ||
+            !TranslationTextPolicy.isUsableDisplayText(correctedRecord.source) ||
+            !TranslationTextPolicy.isUsableDisplayText(correctedRecord.translation)
         ) {
             return
         }
-        records += record
+        records += correctedRecord
     }
 
     /**
@@ -131,16 +135,26 @@ internal class TranslationIndexCompiler {
             val translations = pairs.groupingBy { it.second }.eachCount()
             resolveTranslation(translations)?.let { terms[source] = it }
         }
+        // 人工核对的条件短语必须覆盖包内冲突结果，避免被更短的汉字术语拆成半日文句子。
+        TranslationTextPolicy.BUILT_IN_TERM_ENTRIES.forEach { (source, translation) ->
+            terms[source] = translation
+        }
         val digest = MessageDigest.getInstance("SHA-256")
+        fun updateDigest(value: String) {
+            val bytes = value.toByteArray(Charsets.UTF_8)
+            digest.update((bytes.size ushr 24).toByte())
+            digest.update((bytes.size ushr 16).toByte())
+            digest.update((bytes.size ushr 8).toByte())
+            digest.update(bytes.size.toByte())
+            digest.update(bytes)
+        }
         sorted.forEach { record ->
-            listOf(record.path, record.id, record.field, record.source, record.translation).forEach { value ->
-                val bytes = value.toByteArray(Charsets.UTF_8)
-                digest.update((bytes.size ushr 24).toByte())
-                digest.update((bytes.size ushr 16).toByte())
-                digest.update((bytes.size ushr 8).toByte())
-                digest.update(bytes.size.toByte())
-                digest.update(bytes)
-            }
+            listOf(record.path, record.id, record.field, record.source, record.translation)
+                .forEach(::updateDigest)
+        }
+        TranslationTextPolicy.BUILT_IN_TERM_ENTRIES.forEach { (source, translation) ->
+            // 把内置术语策略纳入摘要，确保已有 schema 7 版本目录不会复用旧索引文件。
+            listOf("built-in-term", source, translation).forEach(::updateDigest)
         }
         return CompiledTranslationIndex(
             version = version,

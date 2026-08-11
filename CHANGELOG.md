@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Add exact Firebase Auth `genericidp`/`recaptcha` browser redirect routing back into the containerized Limbus activities for Apple ID and reCAPTCHA completion.
 - Add an in-app, per-process rolling diagnostic log with uncaught-exception capture, automatic redaction, bounded retention, historical exit data, and a ready-to-copy GitHub Issue template in the exported ZIP.
 - Add a device compatibility card covering Android/API level, arm64 availability, runtime bitness, kernel page size, low-RAM state, battery optimization, and OEM background settings for vivo/iQOO and other common Android brands.
 - Expand install compatibility from Android 12 / API 31 down to Android 8.0 / API 26, matching the current Limbus Company package minimum while keeping the game-required arm64 runtime boundary.
@@ -93,6 +94,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Skip the legacy ART `jmethodID` VM hook for containerized microG Services/FakeStore, preventing Android 13 login helper processes from crashing in `libv++_64.so::hookAndroidVM()`.
+- Stop unhandled synchronous SIGSEGV handlers from returning to an unchanged faulting context and flooding logcat, and preserve sanitized native tombstones as protobuf instead of corrupting them through UTF-8 conversion.
+- Fix automatically wrapped Chinese skill descriptions overlapping by applying the bounded TMP line-spacing floor before layout even when the source contains no literal newline.
+- Preserve translated-font provenance by exact generated text content, so IL2CPP string copies no longer fall back to mixed Japanese/Chinese glyph faces.
+- Correct the reviewed `喘息未定` terminology to `呼吸法` and translate the mixed Japanese condition fragment `破壊されずに命中時` as `未被破坏且命中时`.
+- Allow screenshots of the Limbus guest by clearing only its `FLAG_SECURE` window bit during Activity resume and window-session add/relayout calls.
 - Prefer Limbus' Firebase resource jars before the host APK in the Firebase C++ fallback loader, so real Firebase Auth SDK classes are not shadowed by the container's minimal shim classes during Google sign-in.
 - Preserve Limbus Credentials `HiddenActivity` GMS Parcelable and Binder extras by launching it through a client-local VirtualApp stub instead of unmarshalling the request in the VAMS server process.
 - Fix the remaining Limbus container black screen by preserving libc `getcwd()` pointer-return semantics instead of exposing the raw syscall byte count, which previously became `strlen(0x2)` during Addressables initialization.

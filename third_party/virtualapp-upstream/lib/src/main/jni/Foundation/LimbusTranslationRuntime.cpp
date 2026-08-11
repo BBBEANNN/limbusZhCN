@@ -51,7 +51,8 @@ bool g_probe_started = false;
 bool g_hook_installed = false;
 bool g_font_attempted = false;
 void *g_tmp_font_asset = nullptr;
-std::unordered_set<void *> g_translated_managed_strings;
+// 译文来源按 UTF-8 内容登记，避免游戏复制 IL2CPP String 后丢失仅依赖对象地址的字体标记。
+std::unordered_set<std::string> g_translated_managed_texts;
 struct TmpComponentState {
     void *font = nullptr;
     void *shared_material = nullptr;
@@ -139,6 +140,7 @@ il2cpp_free_owned_fn g_il2cpp_free = nullptr;
 std::atomic<uint32_t> g_language_hook_hits{0};
 std::atomic<uint64_t> g_acquisition_hits{0};
 std::atomic<uint64_t> g_nested_list_hits{0};
+std::atomic<uint64_t> g_tmp_primary_font_switches{0};
 
 bool append_utf8(uint32_t codepoint, std::string *output) {
     if (codepoint <= 0x7f) {
@@ -394,7 +396,8 @@ void *translate_managed_string(void *managed_text) {
     void *replacement = new_managed_string(translated);
     if (replacement != nullptr) {
         pthread_mutex_lock(&g_font_state_lock);
-        g_translated_managed_strings.insert(replacement);
+        // 只登记接管层确实生成过的完整译文，不能按“含非 ASCII”泛化为中文主字体。
+        g_translated_managed_texts.insert(translated);
         pthread_mutex_unlock(&g_font_state_lock);
         uint64_t hits = g_acquisition_hits.fetch_add(1, std::memory_order_relaxed) + 1;
         if (hits == 1 || hits % 500 == 0) {
@@ -406,9 +409,18 @@ void *translate_managed_string(void *managed_text) {
 }
 
 bool is_translated_managed_string(void *managed_text) {
+    if (managed_text == nullptr || g_string_length == nullptr || g_string_chars == nullptr) {
+        return false;
+    }
+    int32_t length = g_string_length(managed_text);
+    std::string text;
+    if (length < 0 || length > 1024 * 1024 ||
+        !utf16_to_utf8(g_string_chars(managed_text), length, &text)) {
+        return false;
+    }
     pthread_mutex_lock(&g_font_state_lock);
-    bool translated = g_translated_managed_strings.find(managed_text) !=
-            g_translated_managed_strings.end();
+    bool translated = g_translated_managed_texts.find(text) !=
+            g_translated_managed_texts.end();
     pthread_mutex_unlock(&g_font_state_lock);
     return translated;
 }
@@ -796,13 +808,12 @@ void apply_translated_tmp_style(void *instance, void *managed_text,
         return;
     }
     float target_spacing = state.line_spacing;
-    bool is_multiline = text.find('\n') != std::string::npos;
     bool has_explicit_line_height = text.find("<line-height=") != std::string::npos;
-    if (is_multiline && !has_explicit_line_height) {
+    if (!has_explicit_line_height) {
         float font_size = 0.0f;
         invoke_float_getter(g_tmp_get_font_size_info, instance, &font_size);
-        // Regular CJK 字面的上下边界比游戏日文字体更饱满；只为普通多行译文设置
-        // 小幅行距下限，避免上下行相碰，同时不叠加但丁笔记已有的 line-height。
+        // TMP 自动折行不会在源字符串中插入换行符，因此必须在布局前统一设置行距下限。
+        // 单行标签不会消费行距；显式 line-height 的但丁笔记仍保持自己的段落节奏。
         float spacing_floor = std::max(2.0f, font_size * 0.12f);
         target_spacing = std::max(target_spacing, spacing_floor);
     }
@@ -838,6 +849,13 @@ void *prepare_tmp_text(void *instance, void *managed_text) {
                 if (current_font != g_tmp_font_asset) {
                     state = capture_tmp_component_state(instance, current_font);
                     g_tmp_set_font(instance, g_tmp_font_asset, g_tmp_set_font_info);
+                    uint64_t switches = g_tmp_primary_font_switches.fetch_add(
+                            1, std::memory_order_relaxed) + 1;
+                    if (switches == 1 || switches % 500 == 0) {
+                        // 周期日志会保留到较晚导出的诊断包，便于确认主字体切换确实发生。
+                        LT_LOGI("TMP Chinese primary font switches=%llu font=%p",
+                                static_cast<unsigned long long>(switches), g_tmp_font_asset);
+                    }
                 } else {
                     find_tmp_component_state(instance, &state);
                 }

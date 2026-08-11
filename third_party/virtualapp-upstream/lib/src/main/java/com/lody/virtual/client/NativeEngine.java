@@ -14,6 +14,7 @@ import com.lody.virtual.client.ipc.VActivityManager;
 import com.lody.virtual.client.natives.NativeMethods;
 import com.lody.virtual.client.stub.StubManifest;
 import com.lody.virtual.helper.compat.BuildCompat;
+import com.lody.virtual.helper.compat.LimbusAuthenticationCompat;
 import com.lody.virtual.helper.utils.VLog;
 import com.lody.virtual.helper.compat.SystemPropertiesCompat;
 import com.lody.virtual.os.VEnvironment;
@@ -373,15 +374,10 @@ public class NativeEngine {
     }
 
     private static boolean shouldSkipVmHook() {
-        if ("com.ProjectMoon.LimbusCompany".equals(VClient.get().getCurrentPackage())) {
-            return true;
-        }
         String nativeBridge = SystemPropertiesCompat.get("ro.dalvik.vm.native.bridge", "");
-        if (nativeBridge == null) {
-            nativeBridge = "";
-        }
-        String lowerBridge = nativeBridge.toLowerCase(java.util.Locale.ENGLISH);
-        return lowerBridge.contains("houdini") || lowerBridge.contains("nb");
+        return LimbusAuthenticationCompat.shouldSkipLegacyVmHook(
+                VClient.get().getCurrentPackage(),
+                nativeBridge);
     }
 
     /**

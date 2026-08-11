@@ -860,6 +860,17 @@ public final class VClient extends IVClient.Stub {
             }
             @Override
             public void onActivityResumed(Activity activity) {
+                // Limbus 是面向普通玩家的游戏，不应继承上游企业容器的防截屏策略。
+                // 这里先清除 Activity 当前状态；窗口会话层还会拦截游戏稍后的重复设置。
+                if (LIMBUS_PACKAGE_NAME.equals(activity.getPackageName())) {
+                    int windowFlags = activity.getWindow().getAttributes().flags;
+                    if ((windowFlags & WindowManager.LayoutParams.FLAG_SECURE) != 0) {
+                        activity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                        Log.i("LimbusVA", "Cleared Limbus FLAG_SECURE on Activity resume activity="
+                                + activity.getClass().getName());
+                    }
+                    return;
+                }
                 //检测截屏权限
                 boolean screenShort = VAppPermissionManager.get().getAppPermissionEnable(
                         activity.getPackageName(), VAppPermissionManager.PROHIBIT_SCREEN_SHORT_RECORDER);

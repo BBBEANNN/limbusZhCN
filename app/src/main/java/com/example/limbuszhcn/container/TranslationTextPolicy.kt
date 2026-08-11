@@ -8,6 +8,28 @@ package com.example.limbuszhcn.container
  */
 internal object TranslationTextPolicy {
     /**
+     * 经截图与日文原文共同确认、可安全跨页面复用的短语覆盖。
+     *
+     * 这些条目优先于汉化包派生出的短术语，专门修复完整句未命中后只替换汉字、
+     * 却把日文助词留在界面上的情况。这里只允许加入已核对过的确定短语。
+     */
+    val BUILT_IN_TERM_ENTRIES: Map<String, String> = linkedMapOf(
+        "破壊されずに命中時" to "未被破坏且命中时",
+        "破坏されずに命中时" to "未被破坏且命中时"
+    )
+
+    /**
+     * 汉化包中已确认的错译片段及其统一译名。
+     *
+     * 使用有序映射保证编译结果和输入摘要稳定，也避免在 native 层维护第二份纠错表。
+     */
+    private val KNOWN_TRANSLATION_CORRECTIONS: Map<String, String> = linkedMapOf(
+        "喘息未定" to "呼吸法",
+        "破壊されずに命中時" to "未被破坏且命中时",
+        "破坏されずに命中时" to "未被破坏且命中时"
+    )
+
+    /**
      * 已确认只承载玩家可见文本的 JSON 字段。
      *
      * 标识符、模型、语音、图标和颜色等元数据不得加入该集合。
@@ -51,6 +73,17 @@ internal object TranslationTextPolicy {
      * @return 字段同时属于显示文本与受控术语来源时返回 `true`。
      */
     fun isTermField(field: String): Boolean = field in TERM_FIELDS && isDisplayField(field)
+
+    /**
+     * 对已人工核对的上游错译和半日文片段做确定性纠正。
+     *
+     * @param value 汉化包提供的原始中文译文。
+     * @return 仅替换已登记片段后的译文；其余内容和富文本标签保持不变。
+     */
+    fun correctKnownTranslation(value: String): String =
+        KNOWN_TRANSLATION_CORRECTIONS.entries.fold(value) { corrected, (source, target) ->
+            corrected.replace(source, target)
+        }
 
     /**
      * 判断文本是否不存在可确定的编码损坏。

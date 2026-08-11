@@ -155,6 +155,25 @@ container data. The next launch completed `PlayVideo -> PlayWarningAnim ->
 PlayDone` and restored `SetLoginInfo : GOOGLE`. Treat this as an APK/package
 consistency failure, not as a new AppSealing termination offset.
 
+## Issue #1 登录崩溃与回调诊断
+
+2026-08-11 的 vivo V2314A / Android 13 诊断包记录了三次可复现原生崩溃：`:p1` 一次、
+`:p2` 两次，栈顶均为 `libv++_64.so` 的 `hookAndroidVM()`，上层依次是
+`NativeEngine.launchEngine()` 与 `VClient.bindApplication()`。这些槽位在登录阶段承载
+microG/FakeStore 辅助进程；主游戏 p0 已跳过同一旧式 VM Hook，所以账号框消失的直接原因
+不是点击事件，而是结果提供方进程在应用绑定阶段死亡。
+
+Apple ID 成功验证后无响应是另一条可独立确认的链路：游戏 manifest 的 Firebase Auth
+返回 Activity 只声明在被虚拟安装的游戏 APK 中，系统浏览器看不到容器内 intent filter。
+宿主必须以精确 URI 跳板把 `genericidp`/`recaptcha` 回调重新送进 p0，不能让回调误开宿主
+主页或设备上真实安装的原游戏。
+
+该诊断包还暴露出两个诊断层问题。首先，同步 `SIGSEGV` 下游处理器若返回但不修改 PC/SP，
+包装器继续返回会重新执行同一故障指令并刷满 logcat；此时应恢复默认处理而不是循环。
+其次，`ApplicationExitInfo.traceInputStream` 的 native tombstone 是 protobuf 二进制，不能先
+按 UTF-8 解码再写回文本。导出器应保持二进制字段长度和地址不变，并在等长覆盖常见凭据后
+以 `.pb` 保存；超过单项上限的 tombstone 应跳过，不能截断成无效 protobuf。
+
 ## Android 16 / ColorOS 16 兼容结论
 
 2026-08-08 在 PHY110、Android 16（API 36）和 Limbus v1.109.1 上完成真机验证。启动已

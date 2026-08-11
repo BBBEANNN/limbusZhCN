@@ -1931,7 +1931,9 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
     }
 
     struct sigaction action = g_limbus_sigsegv_action;
-    if ((action.sa_flags & SA_SIGINFO) != 0 && action.sa_sigaction != nullptr) {
+    if ((action.sa_flags & SA_SIGINFO) != 0
+            && action.sa_sigaction != nullptr
+            && action.sa_sigaction != limbus_sigsegv_guard) {
         /*
          * ART 会把 Java 隐式空指针检查实现为同步 SIGSEGV。它的处理器会修改
          * ucontext，把执行流切换到异常投递入口，然后正常返回。这里必须遵守
@@ -1940,12 +1942,46 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
          * Java 隐式检查都会被误杀成原生崩溃。
          */
         action.sa_sigaction(sig, info, context);
+#if defined(__aarch64__)
+        if (context != nullptr) {
+            const auto *updated_context = reinterpret_cast<const ucontext_t *>(context);
+            uintptr_t updated_pc = static_cast<uintptr_t>(updated_context->uc_mcontext.pc);
+            uintptr_t updated_sp = static_cast<uintptr_t>(updated_context->uc_mcontext.sp);
+            if (updated_pc != pc || updated_sp != sp) {
+                return;
+            }
+            /*
+             * 同步故障的下游处理器若原样返回，CPU 会再次执行同一条故障指令，
+             * 形成 Issue #1 中每毫秒一次的 SIGSEGV/日志死循环。此时不能假装
+             * 信号已被消费，必须继续走下面的默认终止语义。
+             */
+            static const char unchanged_message[] =
+                    "Limbus SIGSEGV guard: downstream handler left fault context unchanged\n";
+            syscall(__NR_write, STDERR_FILENO,
+                    unchanged_message, sizeof(unchanged_message) - 1);
+        } else {
+            return;
+        }
+#else
         return;
+#endif
     } else if (action.sa_handler != SIG_DFL && action.sa_handler != SIG_IGN
             && action.sa_handler != nullptr) {
-        // 传统单参数处理器返回同样表示信号已经处理，应恢复原执行流。
+        // 传统单参数处理器也必须实际改变同步故障上下文，否则会重试同一指令。
         action.sa_handler(sig);
+#if defined(__aarch64__)
+        if (context != nullptr) {
+            const auto *updated_context = reinterpret_cast<const ucontext_t *>(context);
+            if (static_cast<uintptr_t>(updated_context->uc_mcontext.pc) != pc
+                    || static_cast<uintptr_t>(updated_context->uc_mcontext.sp) != sp) {
+                return;
+            }
+        } else {
+            return;
+        }
+#else
         return;
+#endif
     }
 
     // 没有可调用的下游处理器时才保留真实 SIGSEGV 的默认终止语义。

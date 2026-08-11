@@ -1,0 +1,103 @@
+# 收集错译、漏译、残留日文、破碎字形和排版问题的页面级证据。
+name: 汉化与字体反馈
+description: 报告错译、漏译、残留日文、字体破碎或文字重叠
+title: "[汉化] "
+labels:
+  - bug
+  - "area:translation"
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请尽量一次只报告同一页面或同一术语组的问题。准确的页面位置、原文和截图能显著缩短修复时间。
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: 问题类型
+      options:
+        - 错译或术语不一致
+        - 漏译或残留日文
+        - 乱码、缺字或字体破碎
+        - 文字重叠、截断或排版异常
+        - 字重、描边或字体风格异常
+        - 其他汉化问题
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: 汉化器版本
+      placeholder: 例如：1.2（versionCode 3）
+    validations:
+      required: true
+
+  - type: input
+    id: game-version
+    attributes:
+      label: Limbus Company 版本
+      placeholder: 例如：1.109.1 / versionCode 450
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: 出现位置
+      description: 请填写章节、人格、技能、E.G.O、设置页面等可定位信息。
+      placeholder: 例如：李箱“蜘蛛巢 食指 父辈”人格技能 2
+    validations:
+      required: true
+
+  - type: textarea
+    id: source-text
+    attributes:
+      label: 日文原文
+      description: 能看到原文时请完整填写；若完全无法辨认，可填写“无法辨认”。
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-text
+    attributes:
+      label: 当前显示内容
+      description: 请完整抄录当前错译、残留日文或破碎文字。
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-text
+    attributes:
+      label: 建议译文或期望效果
+      description: 如果不确定准确译法，可说明文本应表达的含义或字体应有的效果。
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: 截图
+      description: 请拖入完整界面截图，并避免包含账号、邮箱或其他隐私信息。
+      placeholder: 将图片拖到这里，等待上传完成后再提交。
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: 补充说明
+      description: 可说明问题是否稳定复现、是否只在特定字号或页面出现。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我已确认使用最新 Release，并搜索过相同页面或术语的现有 Issue。
+          required: true
+        - label: 截图和文本中不包含账号、邮箱、Token 或其他隐私信息。
+          required: true

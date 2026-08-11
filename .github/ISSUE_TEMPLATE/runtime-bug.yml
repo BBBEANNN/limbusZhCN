@@ -1,0 +1,128 @@
+# 收集启动、登录、崩溃、黑屏和设备兼容问题所需的可复现信息。
+name: 运行与兼容故障
+description: 报告启动、登录、崩溃、黑屏、截图或设备兼容问题
+title: "[故障] "
+labels:
+  - bug
+  - "area:runtime"
+  - needs-diagnostics
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请先确认已安装最新 Release，并搜索是否已有相同问题。
+        请勿上传账号密码、Token、Cookie、游戏存档或游戏本体文件。应用导出的诊断包会自动脱敏，但公开上传前仍建议自行检查。
+
+  - type: input
+    id: app-version
+    attributes:
+      label: 汉化器版本
+      description: 可在应用信息或 GitHub Release 页面确认。
+      placeholder: 例如：1.2（versionCode 3）
+    validations:
+      required: true
+
+  - type: input
+    id: game-version
+    attributes:
+      label: Limbus Company 版本
+      description: 请填写游戏显示版本；如知道 versionCode 也请一并填写。
+      placeholder: 例如：1.109.1 / versionCode 450
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: 设备型号
+      description: 请填写品牌和完整型号。
+      placeholder: 例如：vivo V2314A
+    validations:
+      required: true
+
+  - type: input
+    id: android-version
+    attributes:
+      label: Android 版本
+      description: 请同时填写系统版本或厂商系统版本（如 OriginOS、MIUI、ColorOS）。
+      placeholder: 例如：Android 13 / OriginOS 4
+    validations:
+      required: true
+
+  - type: dropdown
+    id: problem-area
+    attributes:
+      label: 问题环节
+      options:
+        - 启动、黑屏或闪退
+        - Google 登录或账号选择
+        - Apple ID 登录或浏览器返回
+        - 汉化包下载、安装或更新
+        - 游戏资源同步或下载
+        - 截图或窗口显示
+        - 网络连接
+        - 其他运行问题
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: 实际现象
+      description: 请说明看到了什么、停在哪一步，以及是否出现提示或错误码。
+      placeholder: 点击 Google 登录后对话框消失，未出现账号选择界面……
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: 期望结果
+      description: 请说明你认为正常情况下应该发生什么。
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 请按顺序列出从打开汉化器到出现问题的操作。
+      placeholder: |
+        1. 打开汉化器并同步游戏
+        2. 启动游戏进入标题页
+        3. 点击 Google 登录
+        4. ……
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducibility
+    attributes:
+      label: 复现频率
+      options:
+        - 每次都能复现
+        - 经常复现
+        - 偶尔复现
+        - 仅出现一次
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 诊断包或截图
+      description: 请拖入应用内“导出诊断包”生成的 ZIP；如界面异常，也可附截图或录屏。
+      placeholder: 将 limbus-diagnostics-*.zip 拖到这里，等待上传完成后再提交。
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我已确认使用最新 Release，且没有找到相同的现有 Issue。
+          required: true
+        - label: 我已检查公开附件，不包含密码、Token、Cookie、存档或游戏本体文件。
+          required: true

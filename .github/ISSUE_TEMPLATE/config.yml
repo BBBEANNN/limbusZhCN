@@ -1,0 +1,6 @@
+# 只向普通报告者开放结构化表单，避免缺少设备、版本和复现信息的空白 Issue。
+blank_issues_enabled: false
+contact_links:
+  - name: 下载最新版本
+    url: https://github.com/BBBEANNN/limbusZhCN/releases/latest
+    about: 提交问题前请先覆盖安装最新 Release 并重新测试。

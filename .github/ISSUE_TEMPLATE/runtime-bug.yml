@@ -5,7 +5,6 @@ title: "[故障] "
 labels:
   - bug
   - "area:runtime"
-  - needs-diagnostics
 assignees: []
 body:
   - type: markdown
@@ -112,8 +111,8 @@ body:
     id: diagnostics
     attributes:
       label: 诊断包或截图
-      description: 请拖入应用内“导出诊断包”生成的 ZIP；如界面异常，也可附截图或录屏。
-      placeholder: 将 limbus-diagnostics-*.zip 拖到这里，等待上传完成后再提交。
+      description: 请拖入应用内“导出诊断包”生成的 ZIP；如无法导出，请说明原因，并尽量附截图或录屏。
+      placeholder: 将 limbus-diagnostics-*.zip 拖到这里，等待上传完成后再提交；无法导出时请说明原因。
     validations:
       required: true
 

@@ -32,15 +32,15 @@ compatibility layer without downloading executable code at first launch.
 ## Chinese localization font
 
 - Runtime asset: `app/src/main/assets/runtime/ChineseFont.ttf`
-- Source project: <https://github.com/LocalizeLimbusCompany/LocalizeLimbusCompany>
-- Source-project license copy:
-  `app/src/main/assets/licenses/LocalizeLimbusCompany-CC-BY-NC-SA-4.0.txt`
-- Base font: Sarasa Gothic
+- Source project: <https://github.com/be5invis/Sarasa-Gothic>
+- Release asset: `SarasaGothicSC-TTF-1.0.40.7z`
+- Font file: `SarasaGothicSC-Regular.ttf`
+- SHA-256: `6541a94ad09601b71dff4100360807f4bb2068a0d5fe8b76c71a75e0cb6cf749`
 - Sarasa Gothic license: SIL Open Font License 1.1
 - OFL text: `app/src/main/assets/licenses/Sarasa-Gothic-OFL-1.1.txt`
 
-The font remains subject to the applicable font and source-project terms and is
-not relicensed under GPL-3.0.
+The font remains subject to the SIL Open Font License and is not relicensed under
+GPL-3.0.
 
 ## Native hook and Android-derived files
 

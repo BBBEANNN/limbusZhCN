@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Add an in-app, per-process rolling diagnostic log with uncaught-exception capture, automatic redaction, bounded retention, historical exit data, and a ready-to-copy GitHub Issue template in the exported ZIP.
+- Add a device compatibility card covering Android/API level, arm64 availability, runtime bitness, kernel page size, low-RAM state, battery optimization, and OEM background settings for vivo/iQOO and other common Android brands.
+- Expand install compatibility from Android 12 / API 31 down to Android 8.0 / API 26, matching the current Limbus Company package minimum while keeping the game-required arm64 runtime boundary.
+- Add schema-7 runtime text policy coverage for `story`, `relatedChapterText`, and `openConditionNumber`, and reject definitively corrupted Unicode/control-code translations while preserving Japanese source text.
+- Add translated TMP material-style inheritance and bounded multiline spacing compensation so coin-skill text retains its black outline and adjacent Chinese rows do not overlap.
 - Add the GPL-3.0 project license and a third-party notice inventory for the public source release.
 - Add a Limbus Activity classloader probe and prefer the bound `LoadedApk` classloader when replacing VirtualApp stub activities, so AppSealing-added payload dex visibility can be inspected during Unity Activity creation.
 - Add Limbus thread context classloader diagnostics during application bind and Unity Activity lifecycle entry, verifying whether Firebase/Unity JNI class lookups can see the AppSealing-mounted payload dex.
@@ -45,6 +50,8 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Replace the bundled Sarasa Gothic SC Bold face with the official Regular face so translated game text uses a lighter weight.
+- Share the Android display-field policy between index collection and the controlled term-field subset, and align the native object-field traversal with the same verified display fields.
 - Make GitHub Releases the only translation update source and keep only the public Releases URL in advanced settings.
 - Compact `AGENTS.md` into a short operational contract and move longer project background into `docs/project-architecture.md`, reducing default Codex context load while keeping architecture details available.
 - Make Limbus native DNS and socket connections bypass VirtualApp network strategy unconditionally, with bounded target/result diagnostics for container-only network failures.

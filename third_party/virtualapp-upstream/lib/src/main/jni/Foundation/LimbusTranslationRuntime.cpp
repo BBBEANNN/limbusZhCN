@@ -31,7 +31,7 @@
 namespace {
 
 const unsigned char kIndexMagic[] = {'L', 'Z', 'T', 'I', '1', 0};
-const uint32_t kIndexSchema = 6;
+const uint32_t kIndexSchema = 7;
 const uint32_t kMaxEntries = 1000000;
 const uint32_t kMaxStringBytes = 16 * 1024 * 1024;
 
@@ -52,7 +52,13 @@ bool g_hook_installed = false;
 bool g_font_attempted = false;
 void *g_tmp_font_asset = nullptr;
 std::unordered_set<void *> g_translated_managed_strings;
-std::unordered_map<void *, void *> g_original_tmp_fonts;
+struct TmpComponentState {
+    void *font = nullptr;
+    void *shared_material = nullptr;
+    float line_spacing = 0.0f;
+    bool has_line_spacing = false;
+};
+std::unordered_map<void *, TmpComponentState> g_original_tmp_states;
 uint64_t g_translation_hits = 0;
 char g_il2cpp_path[PATH_MAX] = {};
 
@@ -106,6 +112,16 @@ const void *g_create_tmp_font_info = nullptr;
 const void *g_tmp_set_font_info = nullptr;
 const void *g_tmp_get_font_info = nullptr;
 const void *g_get_fallback_fonts_info = nullptr;
+const void *g_tmp_get_font_material_info = nullptr;
+const void *g_tmp_get_shared_material_info = nullptr;
+const void *g_tmp_set_shared_material_info = nullptr;
+const void *g_tmp_get_line_spacing_info = nullptr;
+const void *g_tmp_set_line_spacing_info = nullptr;
+const void *g_tmp_get_font_size_info = nullptr;
+const void *g_material_get_float_info = nullptr;
+const void *g_material_set_float_info = nullptr;
+const void *g_material_get_color_info = nullptr;
+const void *g_material_set_color_info = nullptr;
 il2cpp_init_fn g_original_il2cpp_init = nullptr;
 dlsym_fn g_original_unity_dlsym = nullptr;
 get_language_fn g_original_get_language = nullptr;
@@ -194,6 +210,22 @@ bool utf8_to_utf16(const std::string &input, std::u16string *output) {
     return true;
 }
 
+bool is_usable_display_text(const std::string &value) {
+    std::u16string utf16;
+    if (value.empty() || !utf8_to_utf16(value, &utf16)) return false;
+    for (char16_t character : utf16) {
+        // U+FFFD 与非法控制字符都说明资源在进入索引前已经损坏。
+        // 保持日文原文比继续渲染方框、不可见控制符或乱码更安全。
+        if (character == 0xfffd ||
+            (character < 0x20 && character != u'\n' && character != u'\r' &&
+             character != u'\t') ||
+            (character >= 0x7f && character <= 0x9f)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void *new_managed_string(const std::string &value) {
     std::u16string utf16;
     if (g_string_new_utf16 == nullptr || !utf8_to_utf16(value, &utf16)) return nullptr;
@@ -208,7 +240,11 @@ void rebuild_term_trie() {
         // A term replacement must be idempotent across acquisition and TMP
         // layers.  "以上" -> "或以上", for example, still contains its source
         // and would grow another "或" every time the string crosses a hook.
-        if (entry.second.find(entry.first) != std::string::npos) continue;
+        if (!is_usable_display_text(entry.first) ||
+            !is_usable_display_text(entry.second) ||
+            entry.second.find(entry.first) != std::string::npos) {
+            continue;
+        }
         size_t node = 0;
         for (unsigned char byte : entry.first) {
             auto child = g_term_trie[node].children.find(byte);
@@ -354,6 +390,7 @@ void *translate_managed_string(void *managed_text) {
             return managed_text;
         }
     }
+    if (!is_usable_display_text(translated)) return managed_text;
     void *replacement = new_managed_string(translated);
     if (replacement != nullptr) {
         pthread_mutex_lock(&g_font_state_lock);
@@ -384,7 +421,13 @@ bool is_display_string_field(const char *name) {
             "shortName", "abName", "simpleDesc", "successDesc", "failureDesc",
             "message", "messageDesc", "result", "text", "subText", "mainText",
             "rawDesc", "acquisitionMethod", "skinItemTitle", "skinItemDesc",
-            "oneLineTitle"
+            "oneLineTitle", "nickName", "longName", "specialName",
+            "abnormalityName", "panicName", "behaveDesc", "eventDesc", "prevDesc",
+            "subDesc", "panicDescription", "lowMoraleDescription", "codeName", "clue",
+            "sentence", "story", "openCondition", "openConditionNumber",
+            "relatedChapterText", "askLevelUp", "company", "area", "chapter",
+            "chapterNumber", "chaptertitle", "parttitle", "timeline", "teacher",
+            "add", "min", "variation", "variation2"
     };
     for (const char *field : fields) {
         if (strcmp(name, field) == 0) return true;
@@ -549,7 +592,7 @@ bool ensure_tmp_font() {
         if (separator != std::string::npos) font_file.resize(separator);
         separator = font_file.find_last_of('/');
         if (separator != std::string::npos) font_file.resize(separator);
-        font_file += "/runtime-font/ChineseFont-a56a06f1.ttf";
+        font_file += "/runtime-font/ChineseFont-6541a94a.ttf";
         void *font_path = new_managed_string(font_file);
         int32_t face_index = 0;
         int32_t sampling_size = 32;
@@ -597,6 +640,175 @@ bool ensure_tmp_font() {
     return ready;
 }
 
+bool invoke_float_getter(const void *method_info, void *instance, float *value) {
+    if (method_info == nullptr || instance == nullptr || value == nullptr ||
+        g_runtime_invoke == nullptr || g_object_unbox == nullptr) {
+        return false;
+    }
+    void *exception = nullptr;
+    void *boxed = g_runtime_invoke(method_info, instance, nullptr, &exception);
+    void *unboxed = exception == nullptr && boxed != nullptr ? g_object_unbox(boxed) : nullptr;
+    if (unboxed == nullptr) return false;
+    memcpy(value, unboxed, sizeof(*value));
+    return true;
+}
+
+void invoke_float_setter(const void *method_info, void *instance, float value) {
+    if (method_info == nullptr || instance == nullptr || g_runtime_invoke == nullptr) return;
+    void *args[] = {&value};
+    void *exception = nullptr;
+    g_runtime_invoke(method_info, instance, args, &exception);
+}
+
+void *invoke_object_getter(const void *method_info, void *instance) {
+    if (method_info == nullptr || instance == nullptr || g_runtime_invoke == nullptr) return nullptr;
+    void *exception = nullptr;
+    void *result = g_runtime_invoke(method_info, instance, nullptr, &exception);
+    return exception == nullptr ? result : nullptr;
+}
+
+void invoke_object_setter(const void *method_info, void *instance, void *value) {
+    if (method_info == nullptr || instance == nullptr || g_runtime_invoke == nullptr) return;
+    void *args[] = {value};
+    void *exception = nullptr;
+    g_runtime_invoke(method_info, instance, args, &exception);
+}
+
+struct MaterialOutlineStyle {
+    float width = 0.0f;
+    float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    bool has_width = false;
+    bool has_color = false;
+};
+
+MaterialOutlineStyle read_material_outline(void *material) {
+    MaterialOutlineStyle style;
+    if (material == nullptr || g_runtime_invoke == nullptr || g_object_unbox == nullptr) {
+        return style;
+    }
+    void *width_name = new_managed_string("_OutlineWidth");
+    void *color_name = new_managed_string("_OutlineColor");
+    if (width_name != nullptr && g_material_get_float_info != nullptr) {
+        void *args[] = {width_name};
+        void *exception = nullptr;
+        void *boxed = g_runtime_invoke(g_material_get_float_info, material, args, &exception);
+        void *unboxed = exception == nullptr && boxed != nullptr ? g_object_unbox(boxed) : nullptr;
+        if (unboxed != nullptr) {
+            memcpy(&style.width, unboxed, sizeof(style.width));
+            style.has_width = true;
+        }
+    }
+    if (color_name != nullptr && g_material_get_color_info != nullptr) {
+        void *args[] = {color_name};
+        void *exception = nullptr;
+        void *boxed = g_runtime_invoke(g_material_get_color_info, material, args, &exception);
+        void *unboxed = exception == nullptr && boxed != nullptr ? g_object_unbox(boxed) : nullptr;
+        if (unboxed != nullptr) {
+            memcpy(style.color, unboxed, sizeof(style.color));
+            style.has_color = true;
+        }
+    }
+    return style;
+}
+
+void apply_material_outline(void *material, const MaterialOutlineStyle &style) {
+    if (material == nullptr || !style.has_width || style.width <= 0.0001f ||
+        g_runtime_invoke == nullptr) {
+        return;
+    }
+    void *width_name = new_managed_string("_OutlineWidth");
+    void *color_name = new_managed_string("_OutlineColor");
+    if (width_name != nullptr && g_material_set_float_info != nullptr) {
+        float width = style.width;
+        void *args[] = {width_name, &width};
+        void *exception = nullptr;
+        g_runtime_invoke(g_material_set_float_info, material, args, &exception);
+    }
+    if (color_name != nullptr && g_material_set_color_info != nullptr) {
+        // 拼点/技能组件原材质已有描边宽度时，中文材质继承宽度并统一为不透明黑边。
+        // 这样既保留游戏层级感，也不会给原本没有描边的普通正文强行加边。
+        float black[4] = {0.0f, 0.0f, 0.0f,
+                          style.has_color ? std::max(style.color[3], 0.95f) : 1.0f};
+        void *args[] = {color_name, black};
+        void *exception = nullptr;
+        g_runtime_invoke(g_material_set_color_info, material, args, &exception);
+    }
+}
+
+TmpComponentState capture_tmp_component_state(void *instance, void *font) {
+    TmpComponentState candidate;
+    candidate.font = font;
+    candidate.shared_material = invoke_object_getter(g_tmp_get_shared_material_info, instance);
+    candidate.has_line_spacing = invoke_float_getter(
+            g_tmp_get_line_spacing_info, instance, &candidate.line_spacing);
+    pthread_mutex_lock(&g_font_state_lock);
+    auto inserted = g_original_tmp_states.emplace(instance, candidate);
+    TmpComponentState state = inserted.first->second;
+    pthread_mutex_unlock(&g_font_state_lock);
+    return state;
+}
+
+bool find_tmp_component_state(void *instance, TmpComponentState *state) {
+    pthread_mutex_lock(&g_font_state_lock);
+    auto saved = g_original_tmp_states.find(instance);
+    bool found = saved != g_original_tmp_states.end();
+    if (found && state != nullptr) *state = saved->second;
+    pthread_mutex_unlock(&g_font_state_lock);
+    return found;
+}
+
+void restore_tmp_component_state(void *instance) {
+    TmpComponentState state;
+    bool restore = false;
+    pthread_mutex_lock(&g_font_state_lock);
+    auto saved = g_original_tmp_states.find(instance);
+    if (saved != g_original_tmp_states.end()) {
+        state = saved->second;
+        g_original_tmp_states.erase(saved);
+        restore = true;
+    }
+    pthread_mutex_unlock(&g_font_state_lock);
+    if (!restore) return;
+    // 组件会被列表复用；必须按字体、材质、行距的顺序恢复完整原始样式。
+    if (g_tmp_set_font != nullptr) g_tmp_set_font(instance, state.font, g_tmp_set_font_info);
+    if (state.shared_material != nullptr) {
+        invoke_object_setter(g_tmp_set_shared_material_info, instance, state.shared_material);
+    }
+    if (state.has_line_spacing) {
+        invoke_float_setter(g_tmp_set_line_spacing_info, instance, state.line_spacing);
+    }
+}
+
+void apply_translated_tmp_style(void *instance, void *managed_text,
+                                const TmpComponentState &state) {
+    MaterialOutlineStyle outline = read_material_outline(state.shared_material);
+    void *translated_material = invoke_object_getter(g_tmp_get_font_material_info, instance);
+    apply_material_outline(translated_material, outline);
+
+    if (!state.has_line_spacing || managed_text == nullptr || g_string_length == nullptr ||
+        g_string_chars == nullptr) {
+        return;
+    }
+    int32_t length = g_string_length(managed_text);
+    std::string text;
+    if (length < 0 || length > 1024 * 1024 ||
+        !utf16_to_utf8(g_string_chars(managed_text), length, &text)) {
+        return;
+    }
+    float target_spacing = state.line_spacing;
+    bool is_multiline = text.find('\n') != std::string::npos;
+    bool has_explicit_line_height = text.find("<line-height=") != std::string::npos;
+    if (is_multiline && !has_explicit_line_height) {
+        float font_size = 0.0f;
+        invoke_float_getter(g_tmp_get_font_size_info, instance, &font_size);
+        // Regular CJK 字面的上下边界比游戏日文字体更饱满；只为普通多行译文设置
+        // 小幅行距下限，避免上下行相碰，同时不叠加但丁笔记已有的 line-height。
+        float spacing_floor = std::max(2.0f, font_size * 0.12f);
+        target_spacing = std::max(target_spacing, spacing_floor);
+    }
+    invoke_float_setter(g_tmp_set_line_spacing_info, instance, target_spacing);
+}
+
 void *prepare_tmp_text(void *instance, void *managed_text) {
     void *replacement = managed_text;
     if (instance != nullptr && managed_text != nullptr && g_string_length != nullptr &&
@@ -622,26 +834,16 @@ void *prepare_tmp_text(void *instance, void *managed_text) {
             if (translated && ensure_tmp_font() && g_tmp_get_font != nullptr &&
                 g_tmp_set_font != nullptr) {
                 void *current_font = g_tmp_get_font(instance, g_tmp_get_font_info);
+                TmpComponentState state;
                 if (current_font != g_tmp_font_asset) {
-                    pthread_mutex_lock(&g_font_state_lock);
-                    g_original_tmp_fonts.emplace(instance, current_font);
-                    pthread_mutex_unlock(&g_font_state_lock);
+                    state = capture_tmp_component_state(instance, current_font);
                     g_tmp_set_font(instance, g_tmp_font_asset, g_tmp_set_font_info);
+                } else {
+                    find_tmp_component_state(instance, &state);
                 }
-            } else if (!translated && g_tmp_set_font != nullptr) {
-                void *original_font = nullptr;
-                bool restore = false;
-                pthread_mutex_lock(&g_font_state_lock);
-                auto saved = g_original_tmp_fonts.find(instance);
-                if (saved != g_original_tmp_fonts.end()) {
-                    original_font = saved->second;
-                    g_original_tmp_fonts.erase(saved);
-                    restore = true;
-                }
-                pthread_mutex_unlock(&g_font_state_lock);
-                if (restore) {
-                    g_tmp_set_font(instance, original_font, g_tmp_set_font_info);
-                }
+                apply_translated_tmp_style(instance, replacement, state);
+            } else if (!translated) {
+                restore_tmp_component_state(instance);
             }
             if (replacement != managed_text) {
                 uint64_t hits = __atomic_add_fetch(&g_translation_hits, 1, __ATOMIC_RELAXED);
@@ -991,6 +1193,7 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
     void *ui_text_class = nullptr;
     void *tmp_font_class = nullptr;
     void *unity_font_class = nullptr;
+    void *material_class = nullptr;
     void *tmp_settings_class = nullptr;
     const void *get_language_method = nullptr;
     const void *get_global_language_method = nullptr;
@@ -1034,6 +1237,9 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
         }
         if (unity_font_class == nullptr) {
             unity_font_class = class_from_name(image, "UnityEngine", "Font");
+        }
+        if (material_class == nullptr) {
+            material_class = class_from_name(image, "UnityEngine", "Material");
         }
         if (tmp_settings_class == nullptr) {
             tmp_settings_class = class_from_name(image, "TMPro", "TMP_Settings");
@@ -1122,9 +1328,60 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
         tmp_set_font_method = class_get_method_from_name(tmp_text_class, "set_font", 1);
         tmp_get_font_method = class_get_method_from_name(tmp_text_class, "get_font", 0);
     }
+    auto find_method_by_signature = [&](void *klass, const char *expected_name,
+                                        const char *expected_signature) -> const void * {
+        if (klass == nullptr || class_get_methods == nullptr || method_get_name == nullptr ||
+            method_get_param_count == nullptr || method_get_param == nullptr ||
+            type_get_name == nullptr || il2cpp_free == nullptr) {
+            return nullptr;
+        }
+        void *iterator = nullptr;
+        const void *method = nullptr;
+        while ((method = class_get_methods(klass, &iterator)) != nullptr) {
+            const char *method_name = method_get_name(method);
+            if (method_name == nullptr || strcmp(method_name, expected_name) != 0) continue;
+            std::string signature;
+            uint32_t parameter_count = method_get_param_count(method);
+            for (uint32_t parameter = 0; parameter < parameter_count; ++parameter) {
+                char *type_name = type_get_name(method_get_param(method, parameter));
+                if (parameter > 0) signature += ",";
+                signature += type_name == nullptr ? "?" : type_name;
+                if (type_name != nullptr) il2cpp_free(type_name);
+            }
+            if (signature == expected_signature) return method;
+        }
+        return nullptr;
+    };
+    const void *tmp_get_font_material_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "get_fontMaterial", 0);
+    const void *tmp_get_shared_material_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "get_fontSharedMaterial", 0);
+    const void *tmp_set_shared_material_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "set_fontSharedMaterial", 1);
+    const void *tmp_get_line_spacing_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "get_lineSpacing", 0);
+    const void *tmp_set_line_spacing_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "set_lineSpacing", 1);
+    const void *tmp_get_font_size_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "get_fontSize", 0);
+    const void *material_get_float_method = find_method_by_signature(
+            material_class, "GetFloat", "System.String");
+    const void *material_set_float_method = find_method_by_signature(
+            material_class, "SetFloat", "System.String,System.Single");
+    const void *material_get_color_method = find_method_by_signature(
+            material_class, "GetColor", "System.String");
+    const void *material_set_color_method = find_method_by_signature(
+            material_class, "SetColor", "System.String,UnityEngine.Color");
     const void *get_fallback_fonts_method = tmp_settings_class == nullptr ? nullptr :
             class_get_method_from_name(tmp_settings_class, "get_fallbackFontAssets", 0);
     LT_LOGI("TMP fallback getter class=%p method=%p", tmp_settings_class, get_fallback_fonts_method);
+    LT_LOGI("TMP style methods material=%p fontMaterial=%p shared=%p/%p spacing=%p/%p"
+            " fontSize=%p outline=%p/%p/%p/%p",
+            material_class, tmp_get_font_material_method, tmp_get_shared_material_method,
+            tmp_set_shared_material_method, tmp_get_line_spacing_method,
+            tmp_set_line_spacing_method, tmp_get_font_size_method,
+            material_get_float_method, material_set_float_method,
+            material_get_color_method, material_set_color_method);
     if (tmp_font_class != nullptr && create_tmp_font_method == nullptr) {
         create_tmp_font_method = class_get_method_from_name(tmp_font_class, "CreateFontAsset", 9);
     }
@@ -1177,6 +1434,16 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
         g_tmp_set_font_info = tmp_set_font_method;
         g_tmp_get_font_info = tmp_get_font_method;
         g_get_fallback_fonts_info = get_fallback_fonts_method;
+        g_tmp_get_font_material_info = tmp_get_font_material_method;
+        g_tmp_get_shared_material_info = tmp_get_shared_material_method;
+        g_tmp_set_shared_material_info = tmp_set_shared_material_method;
+        g_tmp_get_line_spacing_info = tmp_get_line_spacing_method;
+        g_tmp_set_line_spacing_info = tmp_set_line_spacing_method;
+        g_tmp_get_font_size_info = tmp_get_font_size_method;
+        g_material_get_float_info = material_get_float_method;
+        g_material_set_float_info = material_set_float_method;
+        g_material_get_color_info = material_get_color_method;
+        g_material_set_color_info = material_set_color_method;
         MSHookFunction(tmp_pointer, reinterpret_cast<void *>(replacement_tmp_set_text),
                        reinterpret_cast<void **>(&g_original_tmp_set_text));
         auto has_inline_hook_space = [&](void *klass, void *pointer) {

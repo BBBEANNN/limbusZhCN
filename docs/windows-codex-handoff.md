@@ -13,7 +13,7 @@
 - 源码基线提交：`5008a5359bf75aa52157aa9caf0b419c66e42855`
 - 交接包生成日期：2026-07-20
 - 目标主机：Windows 10/11 x64
-- 目标设备：Android 12（API 31）及以上、`arm64-v8a`
+- 目标设备：Android 8.0（API 26）及以上、`arm64-v8a`；Android 12/13 为当前主要真机验证基线
 
 交接包没有 `.git` 历史，但保留完整的 App 源码、VirtualApp 源码、Gradle Wrapper、测试、
 文档和生产运行必需资产。内置 microG Services、Companion/FakeStore 和中文字体体积较大，
@@ -46,8 +46,10 @@
 | 7-Zip | 当前稳定 x64 | 用于解压/重新制作 `.7z` 交接包 |
 | Python | 3.10+，可选 | 仅运行 `scripts/localize_catalog.py` 时需要 |
 
-App 模块最低 API 是 31。VirtualApp library 自身声明最低 API 23，但最终 APK 仍以 App 的
-API 31 为准。Native 只构建 `arm64-v8a`；模拟器的 x86/x86_64 转译不属于生产基线。
+App 模块最低 API 是 26，与当前 Limbus Company 本体一致。VirtualApp library 自身声明
+最低 API 23，但 App 使用 `java.time`，因此最终 APK 以 API 26 为安全下限。Native 只构建
+`arm64-v8a`；模拟器的 x86/x86_64 转译不属于生产基线。AGP 8.8 与 NDK r30 默认生成
+16 KB 对齐产物，每次正式构建仍必须用 `zipalign -c -P 16` 与 `llvm-objdump -p` 复核。
 
 Gradle 首次构建还需要访问 `google()`、Maven Central 和 Gradle Plugin Portal。主要依赖：
 

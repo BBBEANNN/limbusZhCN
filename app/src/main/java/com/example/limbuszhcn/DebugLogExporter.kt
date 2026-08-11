@@ -34,9 +34,24 @@ internal class DebugLogExporter(private val context: Context) {
         ZipOutputStream(BufferedOutputStream(FileOutputStream(output))).use { zip ->
             zip.writeText("README.txt", README)
             zip.writeText(
+                "ISSUE_TEMPLATE.md",
+                issueTemplate(containerStatus, activeTranslation)
+            )
+            zip.writeText(
                 "runtime.txt",
                 runtimeSummary(containerStatus, activeTranslation)
             )
+            // 持久日志比 logcat 更能覆盖 vivo 等系统在后台直接回收进程后的故障现场。
+            PersistentDiagnosticLog.files(context)
+                .sortedByDescending(File::lastModified)
+                .take(MAX_PERSISTENT_LOG_FILES)
+                .sortedBy(File::getName)
+                .forEach { logFile ->
+                    val content = logFile.inputStream().use { input ->
+                        String(input.readBounded(MAX_PERSISTENT_LOG_BYTES), Charsets.UTF_8)
+                    }.redactedAndBounded(MAX_PERSISTENT_LOG_BYTES)
+                    zip.writeText("persistent/${logFile.name}", content)
+                }
             zip.writeText("logcat.txt", collectLogcat())
             val exits = collectExitReasons()
             zip.writeText("process-exits.txt", exits.summary)
@@ -56,22 +71,41 @@ internal class DebugLogExporter(private val context: Context) {
         activeTranslation: PatchInstallSummary?
     ): String {
         val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode.toLong()
+        }
         val runtime = Runtime.getRuntime()
         val files = context.filesDir
         val microgStatus = MicrogContainerConfig(context).diagnosticStatus()
+        val compatibility = DeviceCompatibility(context).report()
         return buildString {
             appendLine("generatedAt=${Instant.now()}")
             appendLine("timezone=${ZoneId.systemDefault().id}")
             appendLine("appVersionName=${packageInfo.versionName}")
-            appendLine("appVersionCode=${packageInfo.longVersionCode}")
+            appendLine("appVersionCode=$versionCode")
             appendLine("buildType=${BuildConfig.BUILD_TYPE}")
             appendLine("package=${context.packageName}")
             appendLine("uid=${Process.myUid()}")
             appendLine("deviceManufacturer=${Build.MANUFACTURER}")
+            appendLine("deviceBrand=${Build.BRAND}")
             appendLine("deviceModel=${Build.MODEL}")
+            appendLine("deviceProduct=${Build.PRODUCT}")
+            appendLine("deviceName=${Build.DEVICE}")
+            appendLine("buildDisplay=${Build.DISPLAY}")
             appendLine("androidSdk=${Build.VERSION.SDK_INT}")
             appendLine("androidRelease=${Build.VERSION.RELEASE}")
+            appendLine("androidSecurityPatch=${Build.VERSION.SECURITY_PATCH}")
             appendLine("abis=${Build.SUPPORTED_ABIS.joinToString(",")}")
+            appendLine("abis64=${Build.SUPPORTED_64_BIT_ABIS.joinToString(",")}")
+            appendLine("process64Bit=${compatibility.is64BitProcess}")
+            appendLine("pageSizeBytes=${compatibility.pageSizeBytes}")
+            appendLine("lowRamDevice=${compatibility.isLowRamDevice}")
+            appendLine("ignoringBatteryOptimizations=${compatibility.isIgnoringBatteryOptimizations}")
+            appendLine("compatibilitySupported=${compatibility.isSupported}")
+            appendLine("compatibilityWarnings=${compatibility.warnings.joinToString("|")}")
             appendLine("runtimeMaxBytes=${runtime.maxMemory()}")
             appendLine("runtimeFreeBytes=${runtime.freeMemory()}")
             appendLine("appStorageFreeBytes=${files.freeSpace}")
@@ -120,6 +154,12 @@ internal class DebugLogExporter(private val context: Context) {
     }
 
     private fun collectExitReasons(): ExitDiagnostics {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return ExitDiagnostics(
+                summary = "unavailable: historical process exit reasons require Android 11 or newer\n",
+                traces = emptyList()
+            )
+        }
         val manager = context.getSystemService(ActivityManager::class.java)
         val reasons = runCatching {
             manager.getHistoricalProcessExitReasons(context.packageName, 0, MAX_EXIT_REASONS)
@@ -169,6 +209,46 @@ internal class DebugLogExporter(private val context: Context) {
         closeEntry()
     }
 
+    /**
+     * 生成用户可直接复制到 GitHub Issue 的结构化说明。
+     *
+     * @param containerStatus 当前容器状态。
+     * @param activeTranslation 当前激活的汉化版本。
+     * @return 不包含账号与本地路径的 Markdown 模板。
+     */
+    private fun issueTemplate(
+        containerStatus: ContainerStatus,
+        activeTranslation: PatchInstallSummary?
+    ): String {
+        val compatibility = DeviceCompatibility(context).report()
+        return """
+            ## 问题现象
+
+            <!-- 请说明是无法安装、打开即闪退、同步失败、启动游戏失败、黑屏，还是汉化显示异常。 -->
+
+            ## 复现步骤
+
+            1.
+            2.
+            3.
+
+            ## 设备信息
+
+            - 机型：${compatibility.deviceLabel}
+            - 系统：${compatibility.androidLabel}
+            - ABI：${compatibility.abiLabel}
+            - 内存页：${compatibility.pageSizeBytes} bytes
+            - 容器状态：${containerStatus.message}
+            - 游戏版本：${containerStatus.importedVersionCode ?: "未导入"}
+            - 汉化版本：${activeTranslation?.version ?: "未激活"}
+            - 兼容提醒：${compatibility.recommendation}
+
+            ## 补充说明
+
+            <!-- 请把本 ZIP 一并附加到 Issue。公开上传前仍建议检查是否包含不希望公开的信息。 -->
+        """.trimIndent() + "\n"
+    }
+
     private fun InputStream.readBounded(limit: Int): ByteArray {
         val output = ByteArrayOutputStream(minOf(limit, DEFAULT_BUFFER_SIZE))
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -214,6 +294,8 @@ internal class DebugLogExporter(private val context: Context) {
         private const val FILE_PREFIX = "limbus-diagnostics-"
         private const val MAX_ARCHIVE_BYTES = 8L * 1024L * 1024L
         private const val MAX_LOGCAT_BYTES = 3 * 1024 * 1024
+        private const val MAX_PERSISTENT_LOG_BYTES = 768 * 1024
+        private const val MAX_PERSISTENT_LOG_FILES = 12
         private const val MAX_SUMMARY_BYTES = 64 * 1024
         private const val MAX_EXIT_SUMMARY_BYTES = 128 * 1024
         private const val MAX_EXIT_TRACE_BYTES = 512 * 1024
@@ -222,11 +304,11 @@ internal class DebugLogExporter(private val context: Context) {
         private const val MAX_EXIT_TRACES = 3
         private val FILE_STAMP = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
         private val README = """
-            Limbus Company 汉化器调试包
+            Limbus Company 汉化器 Issue 诊断包
 
-            内容：应用与容器状态、当前汉化索引摘要、本应用 UID 的近期日志、历史进程退出原因。
+            内容：可复制的 Issue 模板、设备兼容信息、应用内滚动日志、本应用 UID 的近期日志、历史进程退出原因。
             不包含：游戏资源、存档、PlayerPrefs、汉化渠道地址、Token 或账号配置。
-            文本已经过自动脱敏，但发送前仍建议仅交给汉化器维护者。
+            文本已经过自动脱敏，但公开上传前仍建议自行检查内容。
         """.trimIndent() + "\n"
     }
 }

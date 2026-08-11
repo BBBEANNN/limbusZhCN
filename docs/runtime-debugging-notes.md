@@ -17,7 +17,11 @@ parameter-formatting paths must be covered for full character, skill and story
 translation. `GlobalGameManager.Lang` is forced to the confirmed enum value
 `JP=2` after the IL2CPP initialization boundary, with
 `LocalSave.LocalGameOptionData.GetLanguage()` retained as a compatibility hook.
-Validation requires an actual getter-hit log; hook installation alone does not
+Schema 7 keeps the compiler and native display-field policies aligned and adds the
+verified `story`, `relatedChapterText`, and `openConditionNumber` fields found in
+the current public package. Entries containing replacement characters or illegal
+control bytes are skipped instead of displaying damaged text. Validation requires
+an actual getter-hit log; hook installation alone does not
 prove the game selected Japanese. A user stuck before the settings screen does
 not need to edit the saved English value (`EN=1`) first. PlayerPrefs itself is
 left unchanged.
@@ -37,7 +41,7 @@ records to 93,369 unique entries / 151,950 source records, with 1,080 ambiguous
 sources excluded. This confirms that top-level-only traversal had omitted a
 substantial portion of skill levels and coin descriptions.
 
-Schema 6 retains 19,659 idempotent embedded-term mappings after filtering 26
+Schema 6 retained 19,659 idempotent embedded-term mappings after filtering 26
 unsafe schema-5 candidates, alongside 93,488 exact
 mappings. It resolves dominant UI terminology such as `囚人 -> 罪人`, extracts
 bracketed keywords such as `攻撃前 -> 攻击前`, and strips TMP tags to recover
@@ -60,8 +64,10 @@ dash. Removing only those tags reproduced the exact indexed Japanese source.
 The exact fallback now normalizes this layout-only markup and reapplies the same
 paragraph spacing to translated Chinese lines.
 
-The bundled LocalizeLimbusCompany `ChineseFont.ttf` is Sarasa Gothic SC Bold.
-Its initial 1024x1024 dynamic atlas filled after roughly one thousand
+The original bundled LocalizeLimbusCompany `ChineseFont.ttf` was Sarasa Gothic SC
+Bold. It has been replaced by the official Sarasa Gothic SC Regular face because
+the bold contours made skill descriptions visibly heavier than the game UI. Its
+initial 1024x1024 dynamic atlas filled after roughly one thousand
 translations and produced black blocks or missing letters, so production uses a
 4096x4096 atlas. Keeping the Japanese primary face for translated paragraphs
 then exposed a separate visual defect: common Han glyphs came from that face
@@ -69,7 +75,11 @@ while Simplified-Chinese-only glyphs came from the bold fallback, producing
 alternating weights within a word. The runtime now tags managed strings it
 creates as translation results and temporarily assigns the same Chinese asset as
 primary only for those tagged strings. It remembers and restores the component's
-original font when a recycled TMP object receives untagged text. The global
+original font and material when a recycled TMP object receives untagged text. The
+source material's outline width/color are copied to the per-component Chinese
+material, preserving the black edge used by coin-skill text. Translated multiline
+text without explicit `line-height` markup receives a bounded spacing adjustment
+to prevent adjacent rows from overlapping. The global
 fallback remains registered for early layout and this policy is not inferred
 from non-ASCII content alone.
 

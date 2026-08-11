@@ -19,10 +19,13 @@ android {
 
     defaultConfig {
         applicationId = "com.example.limbuszhcn"
-        minSdk = 31
+        // 与当前 Limbus Company 本体保持一致，覆盖 Android 8.0 及以上仍在使用的常见机型。
+        // VirtualApp 库自身最低支持 API 23，但应用使用了 java.time，因此安全下限设为 API 26。
+        minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        // v1.1 引入字体渲染、文本覆盖、常见机型兼容和 Issue 诊断系统更新。
+        versionCode = 2
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

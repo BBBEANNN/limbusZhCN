@@ -60,6 +60,41 @@ class TranslationIndexCompilerTest {
         assertEquals(1, compiled.dominantEntryCount)
     }
 
+    /** 验证剧情、章节关联文本和解锁编号均进入 schema 7 显示字段策略。 */
+    @Test
+    fun includesVerifiedStoryAndUnlockDisplayFields() {
+        val compiler = TranslationIndexCompiler().apply {
+            add(record("Guide.json", "story", "story", "記録を読む。", "阅读记录。"))
+            add(record("Unlock.json", "chapter", "relatedChapterText", "第九章", "第九章"))
+            add(record("Unlock.json", "condition", "openConditionNumber", "九・五―十四", "9.5-14"))
+        }
+
+        val compiled = compiler.compile("2026080601", "archive")
+
+        assertEquals("阅读记录。", compiled.uniqueEntries["記録を読む。"])
+        assertEquals("9.5-14", compiled.uniqueEntries["九・五―十四"])
+        assertFalse(compiled.uniqueEntries.containsKey("第九章"))
+        assertTrue(TranslationTextPolicy.isDisplayField("story"))
+        assertTrue(TranslationTextPolicy.isDisplayField("relatedChapterText"))
+        assertTrue(TranslationTextPolicy.isDisplayField("openConditionNumber"))
+    }
+
+    /** 验证确定损坏的 Unicode/control 文本被跳过，而剧情符号文本仍被保留。 */
+    @Test
+    fun rejectsDefinitivelyCorruptedDisplayText() {
+        val compiler = TranslationIndexCompiler().apply {
+            add(record("Broken.json", "replacement", "content", "壊れた一", "损坏\uFFFD文本"))
+            add(record("Broken.json", "control", "content", "壊れた二", "损坏\u0085文本"))
+            add(record("Good.json", "symbol", "content", "信号", "?!>@!#$@!?!>#!#!"))
+        }
+
+        val compiled = compiler.compile("2026080601", "archive")
+
+        assertFalse(compiled.uniqueEntries.containsKey("壊れた一"))
+        assertFalse(compiled.uniqueEntries.containsKey("壊れた二"))
+        assertEquals("?!>@!#$@!?!>#!#!", compiled.uniqueEntries["信号"])
+    }
+
     @Test
     fun activatesImmutableBinaryIndexAndPointer() {
         val root = Files.createTempDirectory("limbus-index-test")
@@ -71,11 +106,11 @@ class TranslationIndexCompilerTest {
         val indexFile = TranslationIndexStore(root).activate(compiled)
 
         assertTrue(indexFile.exists())
-        assertTrue(indexFile.parent.fileName.toString().contains("-s6-"))
+        assertTrue(indexFile.parent.fileName.toString().contains("-s7-"))
         assertEquals(indexFile.toString().replace('\\', '/'), root.resolve("active-index.path").readText().trim())
         DataInputStream(indexFile.inputStream()).use { input ->
             assertEquals("LZTI1\u0000", String(input.readNBytes(6), Charsets.US_ASCII))
-            assertEquals(6, input.readInt())
+            assertEquals(7, input.readInt())
             assertEquals(1, input.readInt())
             assertEquals(1, input.readInt())
             assertEquals("Sinner", input.readSizedUtf8())

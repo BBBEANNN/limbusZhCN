@@ -5,7 +5,6 @@ import android.app.Application
 import android.content.Context
 import android.os.Build
 import android.os.Process
-import android.util.Log
 import com.lody.virtual.client.core.SettingConfig
 import com.lody.virtual.client.core.VirtualCore
 import com.lody.virtual.helper.compat.NotificationChannelCompat
@@ -24,13 +23,18 @@ class LimbusZhCNApplication : Application() {
      */
     override fun attachBaseContext(base: Context) {
         super.attachBaseContext(base)
-        Log.i(TAG, "attachBaseContext pid=${Process.myPid()} process=${base.getProcessNameForLog()} package=$packageName")
+        // 在 VirtualApp 初始化前安装持久日志，才能保留 vivo 等系统在启动早期杀进程时的现场。
+        PersistentDiagnosticLog.install(base)
+        PersistentDiagnosticLog.info(
+            TAG,
+            "attachBaseContext pid=${Process.myPid()} process=${base.getProcessNameForLog()} package=$packageName"
+        )
         invalidateStaleGmsChimeraConfig(base)
         runCatching {
             VirtualCore.get().startup(this, LimbusVirtualConfig(packageName))
-            Log.i(TAG, "VirtualCore.startup success pid=${Process.myPid()}")
+            PersistentDiagnosticLog.info(TAG, "VirtualCore.startup success pid=${Process.myPid()}")
         }.onFailure { error ->
-            Log.e(TAG, "VirtualApp startup failed", error)
+            PersistentDiagnosticLog.error(TAG, "VirtualApp startup failed", error)
         }
     }
 
@@ -43,14 +47,14 @@ class LimbusZhCNApplication : Application() {
             )
             if (config.isFile && config.lastModified() < hostApk.lastModified()) {
                 val deleted = config.delete()
-                Log.i(
+                PersistentDiagnosticLog.info(
                     TAG,
                     "Invalidated stale virtual GMS Chimera config deleted=$deleted " +
                         "configMtime=${config.lastModified()} hostApkMtime=${hostApk.lastModified()}"
                 )
             }
         }.onFailure { error ->
-            Log.w(TAG, "Unable to invalidate stale virtual GMS Chimera config", error)
+            PersistentDiagnosticLog.warn(TAG, "Unable to invalidate stale virtual GMS Chimera config", error)
         }
     }
 
@@ -59,12 +63,15 @@ class LimbusZhCNApplication : Application() {
      */
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "Application.onCreate pid=${Process.myPid()} process=${getProcessNameForLog()} package=$packageName")
+        PersistentDiagnosticLog.info(
+            TAG,
+            "Application.onCreate pid=${Process.myPid()} process=${getProcessNameForLog()} package=$packageName"
+        )
         runCatching {
             VirtualCore.get().initialize(object : VirtualCore.VirtualInitializer() {})
-            Log.i(TAG, "VirtualCore.initialize success pid=${Process.myPid()}")
+            PersistentDiagnosticLog.info(TAG, "VirtualCore.initialize success pid=${Process.myPid()}")
         }.onFailure { error ->
-            Log.e(TAG, "VirtualApp initialize failed", error)
+            PersistentDiagnosticLog.error(TAG, "VirtualApp initialize failed", error)
         }
     }
 

@@ -176,6 +176,8 @@ public final class VClient extends IVClient.Stub {
     private static final String LIMBUS_PLAYCORE_LOCAL_TESTING_PROP = "debug.limbus.playcore.local_testing";
     private static final String LIMBUS_APPSEALING_IP_SERVICE_PROP = "debug.limbus.appsealing_ip_service";
     private static final String LIMBUS_TRANSLATION_REDIRECT_GATE_FILE = "redirect-gate.pid";
+    private static final String LIMBUS_TRANSLATION_FONT_FILE = "ChineseFont-6541a94a.ttf";
+    private static final long LIMBUS_TRANSLATION_FONT_SIZE = 24047784L;
     private static final String LIMBUS_PACKAGE_NAME = "com.ProjectMoon.LimbusCompany";
     private static final String FRAMEWORK_CREDENTIAL_SERVICE_NAME = "credential";
     private static final String MICROG_PACKAGE_NAME = "com.google.android.gms";
@@ -1178,10 +1180,18 @@ public final class VClient extends IVClient.Stub {
         }
     }
 
+    /**
+     * 将内置的 Sarasa Gothic SC Regular 字体发布到宿主私有缓存。
+     *
+     * <p>文件名包含字体 SHA-256 前缀，确保升级后不会继续复用旧的 Bold 缓存；长度校验
+     * 可在 native 创建动态 TMP 字体前发现 APK 资源截断。</p>
+     *
+     * @param context 宿主应用上下文，用于读取 assets 和私有文件目录。
+     */
     private void prepareLimbusTranslationFont(Context context) {
         File fontDirectory = new File(context.getFilesDir(), "translation-cache/runtime-font");
-        File fontFile = new File(fontDirectory, "ChineseFont-a56a06f1.ttf");
-        if (fontFile.isFile() && fontFile.length() == 23870096L) {
+        File fontFile = new File(fontDirectory, LIMBUS_TRANSLATION_FONT_FILE);
+        if (fontFile.isFile() && fontFile.length() == LIMBUS_TRANSLATION_FONT_SIZE) {
             return;
         }
         if (!fontDirectory.isDirectory() && !fontDirectory.mkdirs()) {
@@ -1197,7 +1207,7 @@ public final class VClient extends IVClient.Stub {
                 if (count > 0) output.write(buffer, 0, count);
             }
             output.getFD().sync();
-            if (staging.length() != 23870096L) {
+            if (staging.length() != LIMBUS_TRANSLATION_FONT_SIZE) {
                 throw new IOException("Unexpected ChineseFont.ttf size=" + staging.length());
             }
             if (fontFile.exists() && !fontFile.delete()) {

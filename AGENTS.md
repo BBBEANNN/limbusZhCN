@@ -19,7 +19,8 @@
 - UI 不直接访问真实 `Android/data`; 安装、卸载、复原必须走 `GameStorage`。
 - JSON 补丁只能结构化修改明确的显示文本字段。基础字段为
   `content/dialog/dlg/teller/name/nameWithTitle/desc/description/title/summary/flavor/place`;
-  其余显示文本字段须加入 `ContainerPatchInstaller.TEXT_FIELDS` 的显式白名单后才能启用。
+  `story/relatedChapterText/openConditionNumber` 等新增显示字段也须加入共享的
+  `TranslationTextPolicy.DISPLAY_FIELDS` 白名单,并同步到 native 对象字段接管层后才能启用。
   不改 `id`、`personalityid`、`voicefile`、`usage`、`model`、图标键等元数据。
 - Token、签名口令、账号信息等敏感配置不得写死进源码或文档；汉化包只允许从公开的 GitHub Releases 获取。
 
@@ -65,8 +66,10 @@
   `Rewrite Limbus GMS GetServiceRequest`,随后仍可进入 `PlayDone`。其中
   `libcovault-appsec.so +0x4e564` 的 `SIGILL` 被放行后游戏继续运行,不得把它单独作为
   GMS broker 修复失败的判据。Android 13/MIUI 设备仍需用相同四条日志复测。
-- 运行时文本索引已切换为日语单源 schema 6:版本 2026071001 生成 93488 条完整映射、
-  19659 条幂等短术语映射和 151950 条源记录;Limbus 1.109.1 可解析 149 个 IL2CPP
+- 运行时文本索引已切换为日语单源 schema 7。schema 6 的版本 2026071001 曾生成
+  93488 条完整映射、19659 条幂等短术语映射和 151950 条源记录;schema 7 在此基础上
+  统一编译端/native 显示字段、覆盖 `story/relatedChapterText/openConditionNumber`,并拒绝
+  Unicode 替换字符、非法控制字符等确定损坏的译文。Limbus 1.109.1 可解析 149 个 IL2CPP
   assembly。接管必须在访客配置阶段挂接 `dlsym`,只把 Unity 请求的 `il2cpp_init`
   返回值替换为生命周期包装函数;原初始化返回后才解析 domain 和安装文本 hook。不得
   inline patch `il2cpp_init`,不得并发读取半初始化 domain,也不得用固定启动秒数补偿。
@@ -75,8 +78,11 @@
   注册为全局 fallback;只有能证明由接管层新建的中文托管字符串,才可在赋值期间
   把当前 TMP 组件切换到该中文主字体,以避免日文主字体与粗体 fallback 逐字混排;
   组件复用于非托管文本时必须恢复原主字体,不得按“含非 ASCII”泛化替换所有 TMP。
-  动态 SDF 图集必须使用 4096x4096,1024x1024 已实测会在技能页加载约千条文本后丢失
-  旧字形。字体创建或 fallback 注册失败时必须保持原文,不得输出方框文本。
+  内置主字体使用 Sarasa Gothic SC Regular,动态 SDF 图集必须使用 4096x4096,1024x1024
+  已实测会在技能页加载约千条文本后丢失旧字形。切换中文字体时须保存并恢复组件原字体
+  与材质,并把原 TMP 材质的黑色描边继承到中文材质;已汉化的普通多行文本须做有限行距
+  补偿,带显式 `line-height` 的文本不得重复补偿。字体创建或 fallback 注册失败时必须
+  保持原文,不得输出方框文本。
 - 当前生产文本接管目标为 OurPlay 风格的日语全量模式:只编译设备上的日文
   `jp/JP_*` 原文到中文,但必须递归覆盖 `dataList`、嵌套技能/硬币表、故事对白等显式
   显示文本字段。TMP 文本赋值只作为最终 UI fallback;人物、人格、技能和剧情还要在
@@ -88,7 +94,7 @@
   Getter 在 arm64 上仅相隔 4--8 字节,仍由 TMP/UI 精确匹配兜底,不得批量 inline hook。
 - `TextData_SkillPerLevel.GetDesc` 调用原 formatter 前必须用 IL2CPP 反射递归处理
   `levelList -> coinlist -> coindescs`;列表元素通过 `get_Count/get_Item` 调用取得,
-  不得硬编码托管 `List<T>` 或数组布局。当前 schema 6 同时存储完整原文索引与
+  不得硬编码托管 `List<T>` 或数组布局。当前 schema 7 同时存储完整原文索引与
   短术语 trie,允许从方括号及 TMP 富文本标签中提取 `攻撃前`、`長姉` 等嵌入术语。
   运行时最长匹配必须原样跳过 `<...>` 富文本标签,纯 ASCII 术语必须满足单词边界;
   编译和运行时还必须排除“译文仍包含原文”的非幂等术语,例如 `以上 -> 或以上`,否则
@@ -114,9 +120,10 @@
   可读的 `jp/JP_*.json` 低于当前汉化 manifest 候选 JSON 的 90%,不得激活残缺索引、
   不得覆盖旧的可用索引。首次安装时应缓存汉化包并启动资源准备模式;用户进入游戏
   完成资源下载后,下一次启动从缓存重建。源文本 miss 只保持日文,不应导致整体失效。
-- 用户诊断包只能采集汉化器 UID 可见的有限 logcat、应用/设备版本、容器与索引摘要、
-  历史进程退出原因。不得打包游戏资源、PlayerPrefs、账号信息或汉化器配置;导出前须
-  对 Token、Authorization、URL 凭据、邮箱和疑似 JWT 做脱敏,并限制单项与总包大小。
+- 用户诊断包只能采集汉化器 UID 可见的有限 logcat、应用自身按进程分离且有大小上限的
+  滚动日志、应用/设备版本、兼容检查、容器与索引摘要、历史进程退出原因。不得打包游戏
+  资源、PlayerPrefs、账号信息或汉化器配置;私有滚动日志写入时及导出前都须对 Token、
+  Authorization、URL 凭据、邮箱和疑似 JWT 做脱敏,并限制单项、文件数量与总包大小。
 - 生产 APK 必须内置已验证的 microG Services 与 Companion/FakeStore APK 及 SHA-256
   清单。新安装在首次导入/启动时自动校验、暂存并装入 VirtualApp;不得再依赖
   `microg_apk_paths` 调试参数或首次启动联网下载。旧设备已有的有效外部配置可继续

@@ -21,6 +21,8 @@ The project does not modify the game APK and does not rely on Frida or Shizuku.
 - `container`: runtime boundary for import, launch, storage, and patch installation.
 - `gamefs`: `GameStorage` abstraction for container data access.
 - `update`: GitHub Releases discovery, hash checking, `.7z` extraction, and patch cache manifest generation.
+- `DeviceCompatibility`: Android 8+/arm64/page-size/low-RAM/background-policy inspection and verified OEM settings fallback.
+- `PersistentDiagnosticLog` / `DebugLogExporter`: per-process bounded logs, uncaught exception capture, redaction, exit reasons, and Issue ZIP generation.
 
 ## Runtime Flow
 
@@ -188,17 +190,22 @@ recursively pairs the translated JSON with the container-visible official Japane
 JSON. Stable `id` values are preferred for array alignment, while matching nested
 arrays such as skill levels and coin descriptions are traversed structurally. Only
 explicitly whitelisted display fields enter the runtime index. Ambiguous source
-strings are counted and excluded from the context-free fallback. Schema 6 also
+strings are counted and excluded from the context-free fallback. Schema 7 also
 stores a curated short-term table for longest-match replacement inside formatted
 or rich text. Dominant conflicts are accepted only with at least three samples,
 80% support and a 3x lead over the runner-up. Paired square brackets and TMP rich
 text tags are removed when deriving terms, so sources such as `[攻撃前]` and
 `<color><s>長姉</s></color>` also cover their embedded runtime forms.
 Runtime longest-match replacement copies complete `<...>` TMP tags without
-inspection and requires word boundaries around ASCII-only terms. Schema 6 also
+inspection and requires word boundaries around ASCII-only terms. Schema 7 also
 rejects non-idempotent term entries whose translation still contains the source.
 For example, `以上 -> 或以上` would match its own result again at every
 `SkillPerLevel -> Skill -> TMP` layer and produce a growing run of `或`.
+The compiler and native object-graph traversal use the same explicit display-field
+policy. In addition to the original skill/UI fields, schema 7 includes verified
+display values such as `story`, `relatedChapterText`, and `openConditionNumber`.
+Translations containing Unicode replacement characters or illegal control bytes
+are omitted so a damaged package entry leaves the official Japanese text intact.
 
 TMP text assignment is the final UI fallback, not the complete translation path.
 Character, identity, skill and story text must also be intercepted while the game
@@ -308,15 +315,21 @@ loads the managed runtime. It installs acquisition and TMP hooks only after the 
 returns. This has no fixed startup delay, does not patch `il2cpp_init`, and does
 not query a half-initialized domain. Exact
 source matches are replaced with managed UTF-16 strings. The bundled
-`ChineseFont.ttf` (Sarasa Gothic SC Bold, from LocalizeLimbusCompany) is copied
+`ChineseFont.ttf` (Sarasa Gothic SC Regular, from the official Sarasa Gothic
+release) is copied
 once to host-private storage, converted to a dynamic 4096x4096 TMP SDF font and
 registered in `TMP_Settings.fallbackFontAssets`. It is deliberately not assigned
 as every component's primary font. The runtime tags only managed strings that it
 creates as translation results. While one of those tagged strings is assigned,
 the receiving TMP component temporarily uses the Chinese asset as its primary
 font so common Han glyphs and Simplified-Chinese-only glyphs do not alternate
-between the Japanese primary face and the bold fallback. A reused component is
-restored to its original font as soon as it receives an untagged string. This
+between the Japanese primary face and the fallback. The original font material is
+remembered as well: outline width/color are copied onto the per-component Chinese
+material so coin-skill text retains the game's black edge, and the exact material
+is restored with the original font. Translated multiline text without an explicit
+`line-height` tag receives a small line-spacing floor to prevent adjacent CJK rows
+from overlapping. A reused component is restored to its original font, material,
+and spacing as soon as it receives an untagged string. This
 must not be generalized to every non-ASCII string. A 1024 atlas caused old glyphs
 to disappear after loading a skill screen, so both primary and fallback use the
 same 4096x4096 dynamic asset. Font creation failure leaves the original text

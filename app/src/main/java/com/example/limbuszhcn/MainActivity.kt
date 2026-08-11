@@ -72,7 +72,11 @@ class MainActivity : ComponentActivity() {
      */
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Log.i(TAG, "MainActivity.onCreate pid=${Process.myPid()} taskId=$taskId intent=${intent.describeForLog()} stack=${shortStack()}")
+        PersistentDiagnosticLog.info(
+            TAG,
+            "MainActivity.onCreate pid=${Process.myPid()} taskId=$taskId " +
+                "intent=${intent.describeForLog()} stack=${shortStack()}"
+        )
         enableEdgeToEdge()
         val preferences = getSharedPreferences("limbus_zhcn", MODE_PRIVATE)
         // 旧版本可能在 SharedPreferences 中保存过中转地址和 Token。新版本不再读取这些值，
@@ -85,6 +89,15 @@ class MainActivity : ComponentActivity() {
         containerRuntime = AndroidContainerRuntimeFactory.create(
             context = applicationContext,
             workspaceRoot = filesDir.toPath().resolve("container-workspace")
+        )
+        val deviceCompatibility = DeviceCompatibility(applicationContext)
+        val compatibilityReport = deviceCompatibility.report()
+        PersistentDiagnosticLog.info(
+            TAG,
+            "compatibility device=${compatibilityReport.deviceLabel} " +
+                "android=${compatibilityReport.androidLabel} abis=${compatibilityReport.abiLabel} " +
+                "pageSize=${compatibilityReport.pageSizeBytes} supported=${compatibilityReport.isSupported} " +
+                "warnings=${compatibilityReport.warnings.joinToString("|")}"
         )
         launchContainerGameFromDebugIntent(intent)
         setContent {
@@ -121,10 +134,10 @@ class MainActivity : ComponentActivity() {
                 if (destination == null || archive == null) {
                     pendingDiagnosticArchive = null
                     archive?.delete()
-                    message = "已取消导出调试日志"
+                    message = "已取消导出 Issue 诊断包"
                 } else {
                     busy = true
-                    busyMessage = "正在保存调试日志"
+                    busyMessage = "正在保存 Issue 诊断包"
                     Thread {
                         val result = runCatching {
                             contentResolver.openOutputStream(destination, "w").use { output ->
@@ -137,7 +150,7 @@ class MainActivity : ComponentActivity() {
                             pendingDiagnosticArchive = null
                             busy = false
                             message = result.fold(
-                                onSuccess = { "调试日志已导出，请将 ZIP 文件发送给维护者" },
+                                onSuccess = { "Issue 诊断包已导出，请将 ZIP 文件附加到 Issue" },
                                 onFailure = { error -> error.userMessage() }
                             )
                         }
@@ -149,11 +162,18 @@ class MainActivity : ComponentActivity() {
                 busy = true
                 busyMessage = progressMessage
                 message = progressMessage
+                PersistentDiagnosticLog.info(TAG, "Task started stage=$progressMessage")
                 Thread {
                     val result = runCatching(task).fold(
-                        onSuccess = { it },
+                        onSuccess = { resultMessage ->
+                            PersistentDiagnosticLog.info(
+                                TAG,
+                                "Task completed stage=$progressMessage result=$resultMessage"
+                            )
+                            resultMessage
+                        },
                         onFailure = { error ->
-                            Log.e(TAG, "Task failed", error)
+                            PersistentDiagnosticLog.error(TAG, "Task failed stage=$progressMessage", error)
                             error.userMessage()
                         }
                     )
@@ -247,6 +267,7 @@ class MainActivity : ComponentActivity() {
                 LimbusApp(
                     containerStatus = containerStatus,
                     lastInstall = lastInstall,
+                    compatibilityReport = compatibilityReport,
                     githubReleaseUrl = githubReleaseUrl,
                     busy = busy,
                     busyMessage = busyMessage,
@@ -254,6 +275,16 @@ class MainActivity : ComponentActivity() {
                     onGithubReleaseUrlChange = { githubReleaseUrl = it },
                     onSaveConfig = ::saveUpdateConfig,
                     onContainerRefresh = ::refreshContainerStatus,
+                    onOpenCompatibilitySettings = {
+                        runCatching {
+                            startActivity(deviceCompatibility.settingsIntent())
+                            PersistentDiagnosticLog.info(TAG, "Opened device compatibility settings")
+                            message = "请允许汉化器自启动、后台运行和后台高耗电"
+                        }.onFailure { error ->
+                            PersistentDiagnosticLog.error(TAG, "Unable to open compatibility settings", error)
+                            message = error.userMessage()
+                        }
+                    },
                     onSyncInstalledGame = {
                         runTask("正在重新同步游戏并启动") {
                             val prepared = prepareGame(forceSync = true)
@@ -272,7 +303,11 @@ class MainActivity : ComponentActivity() {
                             val update = runCatching(::installSelectedTranslation)
                             val summary = update.getOrElse { error ->
                                 if (previous == null) throw error
-                                Log.w(TAG, "Translation update check failed; launching active version", error)
+                                PersistentDiagnosticLog.warn(
+                                    TAG,
+                                    "Translation update check failed; launching active version",
+                                    error
+                                )
                                 previous
                             }
                             val active = installer.activeInstallSummary()
@@ -312,8 +347,9 @@ class MainActivity : ComponentActivity() {
                     },
                     onExportDebugLogs = {
                         busy = true
-                        busyMessage = "正在生成调试日志"
+                        busyMessage = "正在生成 Issue 诊断包"
                         message = busyMessage
+                        PersistentDiagnosticLog.info(TAG, "Issue diagnostics export started")
                         Thread {
                             val result = runCatching {
                                 DebugLogExporter(applicationContext).export(
@@ -326,11 +362,15 @@ class MainActivity : ComponentActivity() {
                                 result.fold(
                                     onSuccess = { archive ->
                                         pendingDiagnosticArchive = archive
-                                        message = "调试日志已生成，请选择保存位置"
+                                        PersistentDiagnosticLog.info(
+                                            TAG,
+                                            "Issue diagnostics export completed bytes=${archive.length()}"
+                                        )
+                                        message = "Issue 诊断包已生成，请选择保存位置"
                                         createDiagnosticDocument.launch(archive.name)
                                     },
                                     onFailure = { error ->
-                                        Log.e(TAG, "Debug log export failed", error)
+                                        PersistentDiagnosticLog.error(TAG, "Issue diagnostics export failed", error)
                                         message = error.userMessage()
                                     }
                                 )
@@ -524,6 +564,7 @@ private fun ContainerStatus.withInstalledVersion(installedVersionCode: Long?): C
 private fun LimbusApp(
     containerStatus: ContainerStatus,
     lastInstall: PatchInstallSummary?,
+    compatibilityReport: DeviceCompatibilityReport,
     githubReleaseUrl: String,
     busy: Boolean,
     busyMessage: String,
@@ -531,6 +572,7 @@ private fun LimbusApp(
     onGithubReleaseUrlChange: (String) -> Unit,
     onSaveConfig: () -> Unit,
     onContainerRefresh: () -> Unit,
+    onOpenCompatibilitySettings: () -> Unit,
     onSyncInstalledGame: () -> Unit,
     onLaunchTranslatedGame: () -> Unit,
     onUpdateTranslation: () -> Unit,
@@ -584,6 +626,11 @@ private fun LimbusApp(
                 containerStatus = containerStatus,
                 lastInstall = lastInstall,
                 message = message
+            )
+            CompatibilityCard(
+                report = compatibilityReport,
+                busy = busy,
+                onOpenSettings = onOpenCompatibilitySettings
             )
             StepCard(
                 title = "启动",
@@ -661,15 +708,47 @@ private fun LimbusApp(
                         enabled = !busy,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("导出调试日志（ZIP）")
+                        Text("导出 Issue 诊断包（ZIP）")
                     }
                     Text(
-                        "日志会自动脱敏，不包含游戏资源、存档或更新地址配置。",
+                        "诊断包包含滚动日志、机型兼容信息和异常退出原因；会自动脱敏，不包含游戏资源、存档或更新地址配置。",
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
+        }
+    }
+}
+
+/**
+ * 展示当前机型的基础兼容结论，并提供 OEM 后台权限设置入口。
+ *
+ * @param report 当前设备兼容报告。
+ * @param busy 主界面是否正在执行其他任务。
+ * @param onOpenSettings 打开系统或 OEM 后台运行设置的回调。
+ */
+@Composable
+private fun CompatibilityCard(
+    report: DeviceCompatibilityReport,
+    busy: Boolean,
+    onOpenSettings: () -> Unit
+) {
+    StepCard(title = "设备兼容", status = report.statusLabel) {
+        Text(report.deviceLabel, style = MaterialTheme.typography.bodyMedium)
+        StatusLine("系统", report.androidLabel)
+        StatusLine(
+            "运行环境",
+            "${if (report.is64BitProcess) "64 位" else "32 位"} / " +
+                "${if (report.pageSizeBytes > 0) "${report.pageSizeBytes / 1024} KB 页" else "页大小未知"}"
+        )
+        Text(report.recommendation, style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(
+            onClick = onOpenSettings,
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("打开后台兼容设置")
         }
     }
 }
@@ -752,6 +831,18 @@ private fun LimbusAppPreview() {
         LimbusApp(
             containerStatus = ContainerStatus(available = true, gameImported = true, message = "容器工作区已导入游戏"),
             lastInstall = PatchInstallSummary(version = "2026050702", writtenFiles = 1952),
+            compatibilityReport = DeviceCompatibilityReport(
+                deviceLabel = "vivo / iQOO 示例机型",
+                androidLabel = "Android 15（API 35）",
+                sdkInt = 35,
+                abiLabel = "arm64-v8a",
+                hasRequiredAbi = true,
+                pageSizeBytes = 16 * 1024L,
+                is64BitProcess = true,
+                isLowRamDevice = false,
+                isIgnoringBatteryOptimizations = false,
+                warnings = listOf("建议允许自启动、后台高耗电和后台运行")
+            ),
             githubReleaseUrl = "https://github.com/LocalizeLimbusCompany/LocalizeLimbusCompany/releases",
             busy = false,
             busyMessage = "正在检查游戏版本并准备启动",
@@ -759,6 +850,7 @@ private fun LimbusAppPreview() {
             onGithubReleaseUrlChange = {},
             onSaveConfig = {},
             onContainerRefresh = {},
+            onOpenCompatibilitySettings = {},
             onSyncInstalledGame = {},
             onLaunchTranslatedGame = {},
             onUpdateTranslation = {},

@@ -300,7 +300,11 @@ class ContainerPatchInstaller(
                     if (!translation.has(field) || translation.isNull(field)) continue
                     val sourceValue = original.opt(field)
                     val translatedValue = translation.opt(field)
-                    if (field in TEXT_FIELDS && sourceValue is String && translatedValue is String) {
+                    if (
+                        TranslationTextPolicy.isDisplayField(field) &&
+                        sourceValue is String &&
+                        translatedValue is String
+                    ) {
                         output += TranslationIndexRecord(
                             path = path,
                             id = objectContext,
@@ -453,23 +457,6 @@ class ContainerPatchInstaller(
         private const val TAG = "LimbusZhCN"
         private const val UPSTREAM_LANG_PREFIX = "LimbusCompany_Data/Lang/LLC_zh-CN/"
         private val LANGUAGE_PREFIX_REGEX = Regex("^(EN|KR|JP)_")
-        /**
-         * Display text only. Resource identifiers, model/voice/icon keys and gameplay metadata
-         * deliberately stay outside this list.
-         */
-        private val TEXT_FIELDS = setOf(
-            "content", "dialog", "dlg", "teller",
-            "name", "nameWithTitle", "nickName", "longName", "specialName",
-            "shortName", "abName", "abnormalityName", "panicName", "skinItemTitle",
-            "desc", "description", "simpleDesc", "summary", "flavor", "rawDesc", "behaveDesc",
-            "eventDesc", "prevDesc", "subDesc", "successDesc", "failureDesc",
-            "message", "messageDesc", "result", "panicDescription",
-            "lowMoraleDescription", "skinItemDesc",
-            "title", "place", "codeName", "clue", "sentence", "text", "subText", "mainText",
-            "openCondition", "askLevelUp",
-            "company", "area", "chapter", "chapterNumber", "chaptertitle", "parttitle",
-            "timeline", "teacher", "add", "min", "variation", "variation2"
-        )
         private val ALIGNMENT_FIELDS = listOf("id", "level", "index", "idx", "originalId")
     }
 

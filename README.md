@@ -12,10 +12,13 @@
 
 - 目标游戏包名：`com.ProjectMoon.LimbusCompany`
 - 汉化器包名：`com.example.limbuszhcn`
-- 最低系统版本：Android 12 / API 31
+- 最低系统版本：Android 8.0 / API 26（与当前游戏本体一致）
+- CPU 架构：`arm64-v8a`（游戏本体与容器原生运行库均为 64 位）
 - 主模块：`:app`
 - 容器模块：`:virtualapp`，源码位于 `third_party/virtualapp-upstream/lib`
 - 已验证设备路径：Redmi / Android 12 + Google Play 版 Limbus `v1.107.1`
+- 已接入兼容检查：vivo/iQOO、MIUI、ColorOS/realme、一加、EMUI/Honor、Flyme 及标准 Android 设置回退
+- Android 15/16：APK 与 `libv++_64.so` 已通过 16 KB ZIP/ELF 对齐检查
 - 已验证能力：
   - 同步宿主 Google Play 安装的 `base.apk`、split APK 和 native library 到容器
   - 从 VirtualApp 容器启动游戏
@@ -24,6 +27,14 @@
   - 登录后进入资源下载流程
 
 资源下载很大。进入资源下载阶段后，不要清空容器数据，也不要卸载容器内的游戏包，否则会触发重新下载。
+
+主界面的“设备兼容”卡片会检查系统版本、arm64、实际内存页、低内存模式与后台限制。
+在 vivo/iQOO 等设备上首次使用时，建议点击“打开后台兼容设置”，允许汉化器自启动、
+后台运行和后台高耗电，避免切换到游戏后容器服务被系统清理。
+
+遇到安装、闪退、黑屏或汉化异常时，可在“高级设置”中导出“Issue 诊断包（ZIP）”。
+诊断包包含自动脱敏的滚动日志、历史进程退出原因、兼容报告和可直接复制的 Issue 模板，
+不包含游戏资源、存档、更新地址配置或账号凭据。
 
 ## 仓库结构
 

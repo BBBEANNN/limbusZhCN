@@ -174,6 +174,12 @@ Apple ID 成功验证后无响应是另一条可独立确认的链路：游戏 m
 按 UTF-8 解码再写回文本。导出器应保持二进制字段长度和地址不变，并在等长覆盖常见凭据后
 以 `.pb` 保存；超过单项上限的 tombstone 应跳过，不能截断成无效 protobuf。
 
+Issue #1 随后的 v1.2 回归包又确认了一个更窄的例外：vivo V2314A / Android 13 上，
+AppSealing 后台 `Thread-5` 会稳定在 `libcovault-appsec.so +0x248d4` 以空 `x0` 读取
+`+0x30`，其下游 handler 在 `exit_group(139)` 被容器拦截后原样返回。该现场不能恢复
+默认 SIGSEGV（会杀死整个游戏），也不能返回重试（会死循环）；运行时必须同时核对基址、
+偏移、故障地址、寄存器、指令和非主线程身份后，仅以原始 `exit` 隔离当前后台线程。
+
 ## Android 16 / ColorOS 16 兼容结论
 
 2026-08-08 在 PHY110、Android 16（API 36）和 Limbus v1.109.1 上完成真机验证。启动已

@@ -190,19 +190,20 @@ recursively pairs the translated JSON with the container-visible official Japane
 JSON. Stable `id` values are preferred for array alignment, while matching nested
 arrays such as skill levels and coin descriptions are traversed structurally. Only
 explicitly whitelisted display fields enter the runtime index. Ambiguous source
-strings are counted and excluded from the context-free fallback. Schema 7 also
+strings are counted and excluded from the context-free fallback. Schema 8 also
 stores a curated short-term table for longest-match replacement inside formatted
 or rich text. Dominant conflicts are accepted only with at least three samples,
 80% support and a 3x lead over the runner-up. Paired square brackets and TMP rich
 text tags are removed when deriving terms, so sources such as `[攻撃前]` and
 `<color><s>長姉</s></color>` also cover their embedded runtime forms.
 Runtime longest-match replacement copies complete `<...>` TMP tags without
-inspection and requires word boundaries around ASCII-only terms. Schema 7 also
-rejects non-idempotent term entries whose translation still contains the source.
-For example, `以上 -> 或以上` would match its own result again at every
-`SkillPerLevel -> Skill -> TMP` layer and produce a growing run of `或`.
+inspection and requires word boundaries around ASCII-only terms. Schema 8 keeps
+expanding package terms such as `以上 -> 或以上`, while the native matcher detects
+whether a source occurrence is already inside the complete translated value. This
+makes repeated `SkillPerLevel -> Skill -> TMP` passes idempotent without discarding
+verified translations from the downloaded package.
 The compiler and native object-graph traversal use the same explicit display-field
-policy. In addition to the original skill/UI fields, schema 7 includes verified
+policy. In addition to the original skill/UI fields, schema 8 includes verified
 display values such as `story`, `relatedChapterText`, and `openConditionNumber`.
 Translations containing Unicode replacement characters or illegal control bytes
 are omitted so a damaged package entry leaves the official Japanese text intact.

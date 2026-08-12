@@ -31,7 +31,7 @@
 namespace {
 
 const unsigned char kIndexMagic[] = {'L', 'Z', 'T', 'I', '1', 0};
-const uint32_t kIndexSchema = 7;
+const uint32_t kIndexSchema = 8;
 const uint32_t kMaxEntries = 1000000;
 const uint32_t kMaxStringBytes = 16 * 1024 * 1024;
 
@@ -42,6 +42,7 @@ std::unordered_map<std::string, std::string> g_index;
 std::unordered_map<std::string, std::string> g_terms;
 struct TermTrieNode {
     std::unordered_map<unsigned char, size_t> children;
+    const std::string *source = nullptr;
     const std::string *translation = nullptr;
 };
 std::vector<TermTrieNode> g_term_trie;
@@ -58,6 +59,14 @@ struct TmpComponentState {
     void *shared_material = nullptr;
     float line_spacing = 0.0f;
     bool has_line_spacing = false;
+    float font_size = 0.0f;
+    bool has_font_size = false;
+    float font_size_min = 0.0f;
+    bool has_font_size_min = false;
+    float font_size_max = 0.0f;
+    bool has_font_size_max = false;
+    bool auto_sizing = false;
+    bool has_auto_sizing = false;
 };
 std::unordered_map<void *, TmpComponentState> g_original_tmp_states;
 uint64_t g_translation_hits = 0;
@@ -113,12 +122,20 @@ const void *g_create_tmp_font_info = nullptr;
 const void *g_tmp_set_font_info = nullptr;
 const void *g_tmp_get_font_info = nullptr;
 const void *g_get_fallback_fonts_info = nullptr;
+const void *g_tmp_font_get_material_info = nullptr;
 const void *g_tmp_get_font_material_info = nullptr;
 const void *g_tmp_get_shared_material_info = nullptr;
 const void *g_tmp_set_shared_material_info = nullptr;
 const void *g_tmp_get_line_spacing_info = nullptr;
 const void *g_tmp_set_line_spacing_info = nullptr;
 const void *g_tmp_get_font_size_info = nullptr;
+const void *g_tmp_set_font_size_info = nullptr;
+const void *g_tmp_get_font_size_min_info = nullptr;
+const void *g_tmp_set_font_size_min_info = nullptr;
+const void *g_tmp_get_font_size_max_info = nullptr;
+const void *g_tmp_set_font_size_max_info = nullptr;
+const void *g_tmp_get_auto_sizing_info = nullptr;
+const void *g_tmp_set_auto_sizing_info = nullptr;
 const void *g_material_get_float_info = nullptr;
 const void *g_material_set_float_info = nullptr;
 const void *g_material_get_color_info = nullptr;
@@ -228,6 +245,18 @@ bool is_usable_display_text(const std::string &value) {
     return true;
 }
 
+bool contains_japanese_kana(const std::string &value) {
+    std::u16string utf16;
+    if (!utf8_to_utf16(value, &utf16)) return false;
+    return std::any_of(utf16.begin(), utf16.end(), [](char16_t character) {
+        // 覆盖平假名、片假名、片假名扩展与半角片假名。日文汉字与中文共用码位，
+        // 不能单凭汉字判定，否则会误伤“振動 -> 震颤”一类合法术语。
+        return (character >= 0x3040 && character <= 0x30ff) ||
+               (character >= 0x31f0 && character <= 0x31ff) ||
+               (character >= 0xff66 && character <= 0xff9f);
+    });
+}
+
 void *new_managed_string(const std::string &value) {
     std::u16string utf16;
     if (g_string_new_utf16 == nullptr || !utf8_to_utf16(value, &utf16)) return nullptr;
@@ -239,12 +268,9 @@ void rebuild_term_trie() {
     g_term_trie.clear();
     g_term_trie.emplace_back();
     for (const auto &entry : g_terms) {
-        // A term replacement must be idempotent across acquisition and TMP
-        // layers.  "以上" -> "或以上", for example, still contains its source
-        // and would grow another "或" every time the string crosses a hook.
         if (!is_usable_display_text(entry.first) ||
             !is_usable_display_text(entry.second) ||
-            entry.second.find(entry.first) != std::string::npos) {
+            entry.first == entry.second) {
             continue;
         }
         size_t node = 0;
@@ -259,6 +285,7 @@ void rebuild_term_trie() {
                 node = child->second;
             }
         }
+        g_term_trie[node].source = &entry.first;
         g_term_trie[node].translation = &entry.second;
     }
 }
@@ -282,6 +309,7 @@ bool translate_embedded_terms(const std::string &source, std::string *output) {
         }
         size_t node = 0;
         size_t best_end = offset;
+        const std::string *best_source = nullptr;
         const std::string *best = nullptr;
         for (size_t cursor = offset; cursor < source.size(); ++cursor) {
             unsigned char byte = static_cast<unsigned char>(source[cursor]);
@@ -289,8 +317,30 @@ bool translate_embedded_terms(const std::string &source, std::string *output) {
             if (child == g_term_trie[node].children.end()) break;
             node = child->second;
             if (g_term_trie[node].translation != nullptr) {
+                best_source = g_term_trie[node].source;
                 best = g_term_trie[node].translation;
                 best_end = cursor + 1;
+            }
+        }
+        if (best != nullptr && best_source != nullptr) {
+            // “呼吸 -> 呼吸法”“以上 -> 或以上”这类包内正式词条必须保留。
+            // 若当前命中本来就位于完整译文内部，则跳过，保证对象获取层与 TMP 层
+            // 多次经过同一字符串时不会不断追加前后缀。
+            size_t translated_offset = best->find(*best_source);
+            bool already_translated = false;
+            while (translated_offset != std::string::npos) {
+                if (offset >= translated_offset) {
+                    size_t translated_start = offset - translated_offset;
+                    if (source.compare(translated_start, best->size(), *best) == 0) {
+                        already_translated = true;
+                        break;
+                    }
+                }
+                translated_offset = best->find(*best_source, translated_offset + 1);
+            }
+            if (already_translated) {
+                best = nullptr;
+                best_source = nullptr;
             }
         }
         if (best != nullptr) {
@@ -324,6 +374,12 @@ bool translate_embedded_terms(const std::string &source, std::string *output) {
         } else {
             output->push_back(source[offset++]);
         }
+    }
+    // 短术语只作为格式化后文本的补充通道。若替换后仍残留假名，说明当前文本
+    // 只命中了局部词条；拒绝输出半中文半日文的碎片，等待完整映射或后续词表覆盖。
+    if (changed && contains_japanese_kana(source) && contains_japanese_kana(*output)) {
+        output->clear();
+        return false;
     }
     return changed;
 }
@@ -672,6 +728,29 @@ void invoke_float_setter(const void *method_info, void *instance, float value) {
     g_runtime_invoke(method_info, instance, args, &exception);
 }
 
+bool invoke_bool_getter(const void *method_info, void *instance, bool *value) {
+    if (method_info == nullptr || instance == nullptr || value == nullptr ||
+        g_runtime_invoke == nullptr || g_object_unbox == nullptr) {
+        return false;
+    }
+    void *exception = nullptr;
+    void *boxed = g_runtime_invoke(method_info, instance, nullptr, &exception);
+    void *unboxed = exception == nullptr && boxed != nullptr ? g_object_unbox(boxed) : nullptr;
+    if (unboxed == nullptr) return false;
+    uint8_t raw = 0;
+    memcpy(&raw, unboxed, sizeof(raw));
+    *value = raw != 0;
+    return true;
+}
+
+void invoke_bool_setter(const void *method_info, void *instance, bool value) {
+    if (method_info == nullptr || instance == nullptr || g_runtime_invoke == nullptr) return;
+    uint8_t raw = value ? 1 : 0;
+    void *args[] = {&raw};
+    void *exception = nullptr;
+    g_runtime_invoke(method_info, instance, args, &exception);
+}
+
 void *invoke_object_getter(const void *method_info, void *instance) {
     if (method_info == nullptr || instance == nullptr || g_runtime_invoke == nullptr) return nullptr;
     void *exception = nullptr;
@@ -753,6 +832,14 @@ TmpComponentState capture_tmp_component_state(void *instance, void *font) {
     candidate.shared_material = invoke_object_getter(g_tmp_get_shared_material_info, instance);
     candidate.has_line_spacing = invoke_float_getter(
             g_tmp_get_line_spacing_info, instance, &candidate.line_spacing);
+    candidate.has_font_size = invoke_float_getter(
+            g_tmp_get_font_size_info, instance, &candidate.font_size);
+    candidate.has_font_size_min = invoke_float_getter(
+            g_tmp_get_font_size_min_info, instance, &candidate.font_size_min);
+    candidate.has_font_size_max = invoke_float_getter(
+            g_tmp_get_font_size_max_info, instance, &candidate.font_size_max);
+    candidate.has_auto_sizing = invoke_bool_getter(
+            g_tmp_get_auto_sizing_info, instance, &candidate.auto_sizing);
     pthread_mutex_lock(&g_font_state_lock);
     auto inserted = g_original_tmp_states.emplace(instance, candidate);
     TmpComponentState state = inserted.first->second;
@@ -781,7 +868,7 @@ void restore_tmp_component_state(void *instance) {
     }
     pthread_mutex_unlock(&g_font_state_lock);
     if (!restore) return;
-    // 组件会被列表复用；必须按字体、材质、行距的顺序恢复完整原始样式。
+    // 组件会被列表复用；必须恢复字体、材质与全部排版约束，避免中文缩放泄漏到日文页面。
     if (g_tmp_set_font != nullptr) g_tmp_set_font(instance, state.font, g_tmp_set_font_info);
     if (state.shared_material != nullptr) {
         invoke_object_setter(g_tmp_set_shared_material_info, instance, state.shared_material);
@@ -789,15 +876,40 @@ void restore_tmp_component_state(void *instance) {
     if (state.has_line_spacing) {
         invoke_float_setter(g_tmp_set_line_spacing_info, instance, state.line_spacing);
     }
+    if (state.has_auto_sizing) {
+        invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, state.auto_sizing);
+    }
+    if (state.has_font_size_min) {
+        invoke_float_setter(g_tmp_set_font_size_min_info, instance, state.font_size_min);
+    }
+    if (state.has_font_size_max) {
+        invoke_float_setter(g_tmp_set_font_size_max_info, instance, state.font_size_max);
+    }
+    if (state.has_font_size) {
+        invoke_float_setter(g_tmp_set_font_size_info, instance, state.font_size);
+    }
+}
+
+size_t count_visible_codepoints(const std::string &text) {
+    size_t count = 0;
+    for (size_t offset = 0; offset < text.size();) {
+        // 富文本标签不占显示宽度，不能让颜色、样式参数把短标签误判成长正文。
+        if (text[offset] == '<') {
+            size_t tag_end = text.find('>', offset + 1);
+            if (tag_end != std::string::npos) {
+                offset = tag_end + 1;
+                continue;
+            }
+        }
+        unsigned char byte = static_cast<unsigned char>(text[offset++]);
+        if ((byte & 0xc0) != 0x80) ++count;
+    }
+    return count;
 }
 
 void apply_translated_tmp_style(void *instance, void *managed_text,
                                 const TmpComponentState &state) {
-    MaterialOutlineStyle outline = read_material_outline(state.shared_material);
-    void *translated_material = invoke_object_getter(g_tmp_get_font_material_info, instance);
-    apply_material_outline(translated_material, outline);
-
-    if (!state.has_line_spacing || managed_text == nullptr || g_string_length == nullptr ||
+    if (managed_text == nullptr || g_string_length == nullptr ||
         g_string_chars == nullptr) {
         return;
     }
@@ -807,17 +919,42 @@ void apply_translated_tmp_style(void *instance, void *managed_text,
         !utf16_to_utf8(g_string_chars(managed_text), length, &text)) {
         return;
     }
-    float target_spacing = state.line_spacing;
-    bool has_explicit_line_height = text.find("<line-height=") != std::string::npos;
-    if (!has_explicit_line_height) {
-        float font_size = 0.0f;
-        invoke_float_getter(g_tmp_get_font_size_info, instance, &font_size);
-        // TMP 自动折行不会在源字符串中插入换行符，因此必须在布局前统一设置行距下限。
-        // 单行标签不会消费行距；显式 line-height 的但丁笔记仍保持自己的段落节奏。
-        float spacing_floor = std::max(2.0f, font_size * 0.12f);
-        target_spacing = std::max(target_spacing, spacing_floor);
+
+    // 中文字体使用自身的默认 SDF 材质，不再复制原字体描边。不同字体图集的描边参数
+    // 尺度并不兼容，强行继承会让细笔画糊成碎块；视觉特效留到可读性稳定后再恢复。
+    if (state.has_line_spacing) {
+        // 原实现额外抬高行距会让滚动区末行被裁切。中文字体本身已有完整行高，保留原值即可。
+        invoke_float_setter(g_tmp_set_line_spacing_info, instance, state.line_spacing);
     }
-    invoke_float_setter(g_tmp_set_line_spacing_info, instance, target_spacing);
+    if (!state.has_font_size || state.font_size <= 0.0f) return;
+
+    size_t visible_length = count_visible_codepoints(text);
+    bool single_line_candidate = text.find('\n') == std::string::npos &&
+            text.find('\r') == std::string::npos && visible_length <= 48;
+    if (single_line_candidate) {
+        // 卡牌名、页签和技能标题通常使用固定矩形。启用 TMP 自适应并下调字号上限，
+        // 优先把完整中文收进原矩形，避免相邻组件互相覆盖或只露出半个字。
+        float scale = visible_length <= 8 ? 0.94f : (visible_length <= 20 ? 0.86f : 0.78f);
+        float maximum = state.font_size * scale;
+        float minimum = std::min(maximum, std::max(6.0f, state.font_size * 0.55f));
+        invoke_float_setter(g_tmp_set_font_size_min_info, instance, minimum);
+        invoke_float_setter(g_tmp_set_font_size_max_info, instance, maximum);
+        invoke_float_setter(g_tmp_set_font_size_info, instance, maximum);
+        invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, true);
+    } else {
+        // 长正文不强制“缩到一屏”，否则说明文字会小到不可读；仅略微收窄字号并保留
+        // 页面原有的自动缩放边界与滚动行为。
+        if (state.has_auto_sizing) {
+            invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, state.auto_sizing);
+        }
+        if (state.has_font_size_min) {
+            invoke_float_setter(g_tmp_set_font_size_min_info, instance, state.font_size_min);
+        }
+        if (state.has_font_size_max) {
+            invoke_float_setter(g_tmp_set_font_size_max_info, instance, state.font_size_max);
+        }
+        invoke_float_setter(g_tmp_set_font_size_info, instance, state.font_size * 0.92f);
+    }
 }
 
 void *prepare_tmp_text(void *instance, void *managed_text) {
@@ -849,6 +986,14 @@ void *prepare_tmp_text(void *instance, void *managed_text) {
                 if (current_font != g_tmp_font_asset) {
                     state = capture_tmp_component_state(instance, current_font);
                     g_tmp_set_font(instance, g_tmp_font_asset, g_tmp_set_font_info);
+                    // TMP 组件可能保留旧字体的共享材质；字体图集与材质不匹配时会把
+                    // 正确字形采样成碎片或白块，因此在字体切换后显式绑定中文字体材质。
+                    void *font_material = invoke_object_getter(
+                            g_tmp_font_get_material_info, g_tmp_font_asset);
+                    if (font_material != nullptr) {
+                        invoke_object_setter(
+                                g_tmp_set_shared_material_info, instance, font_material);
+                    }
                     uint64_t switches = g_tmp_primary_font_switches.fetch_add(
                             1, std::memory_order_relaxed) + 1;
                     if (switches == 1 || switches % 500 == 0) {
@@ -1372,6 +1517,8 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
     };
     const void *tmp_get_font_material_method = tmp_text_class == nullptr ? nullptr :
             class_get_method_from_name(tmp_text_class, "get_fontMaterial", 0);
+    const void *tmp_font_get_material_method = tmp_font_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_font_class, "get_material", 0);
     const void *tmp_get_shared_material_method = tmp_text_class == nullptr ? nullptr :
             class_get_method_from_name(tmp_text_class, "get_fontSharedMaterial", 0);
     const void *tmp_set_shared_material_method = tmp_text_class == nullptr ? nullptr :
@@ -1382,6 +1529,20 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
             class_get_method_from_name(tmp_text_class, "set_lineSpacing", 1);
     const void *tmp_get_font_size_method = tmp_text_class == nullptr ? nullptr :
             class_get_method_from_name(tmp_text_class, "get_fontSize", 0);
+    const void *tmp_set_font_size_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "set_fontSize", 1);
+    const void *tmp_get_font_size_min_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "get_fontSizeMin", 0);
+    const void *tmp_set_font_size_min_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "set_fontSizeMin", 1);
+    const void *tmp_get_font_size_max_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "get_fontSizeMax", 0);
+    const void *tmp_set_font_size_max_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "set_fontSizeMax", 1);
+    const void *tmp_get_auto_sizing_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "get_enableAutoSizing", 0);
+    const void *tmp_set_auto_sizing_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "set_enableAutoSizing", 1);
     const void *material_get_float_method = find_method_by_signature(
             material_class, "GetFloat", "System.String");
     const void *material_set_float_method = find_method_by_signature(
@@ -1393,11 +1554,15 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
     const void *get_fallback_fonts_method = tmp_settings_class == nullptr ? nullptr :
             class_get_method_from_name(tmp_settings_class, "get_fallbackFontAssets", 0);
     LT_LOGI("TMP fallback getter class=%p method=%p", tmp_settings_class, get_fallback_fonts_method);
-    LT_LOGI("TMP style methods material=%p fontMaterial=%p shared=%p/%p spacing=%p/%p"
-            " fontSize=%p outline=%p/%p/%p/%p",
-            material_class, tmp_get_font_material_method, tmp_get_shared_material_method,
+    LT_LOGI("TMP style methods material=%p fontAssetMaterial=%p fontMaterial=%p shared=%p/%p spacing=%p/%p"
+            " fontSize=%p/%p min=%p/%p max=%p/%p auto=%p/%p outline=%p/%p/%p/%p",
+            material_class, tmp_font_get_material_method, tmp_get_font_material_method,
+            tmp_get_shared_material_method,
             tmp_set_shared_material_method, tmp_get_line_spacing_method,
-            tmp_set_line_spacing_method, tmp_get_font_size_method,
+            tmp_set_line_spacing_method, tmp_get_font_size_method, tmp_set_font_size_method,
+            tmp_get_font_size_min_method, tmp_set_font_size_min_method,
+            tmp_get_font_size_max_method, tmp_set_font_size_max_method,
+            tmp_get_auto_sizing_method, tmp_set_auto_sizing_method,
             material_get_float_method, material_set_float_method,
             material_get_color_method, material_set_color_method);
     if (tmp_font_class != nullptr && create_tmp_font_method == nullptr) {
@@ -1452,12 +1617,20 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
         g_tmp_set_font_info = tmp_set_font_method;
         g_tmp_get_font_info = tmp_get_font_method;
         g_get_fallback_fonts_info = get_fallback_fonts_method;
+        g_tmp_font_get_material_info = tmp_font_get_material_method;
         g_tmp_get_font_material_info = tmp_get_font_material_method;
         g_tmp_get_shared_material_info = tmp_get_shared_material_method;
         g_tmp_set_shared_material_info = tmp_set_shared_material_method;
         g_tmp_get_line_spacing_info = tmp_get_line_spacing_method;
         g_tmp_set_line_spacing_info = tmp_set_line_spacing_method;
         g_tmp_get_font_size_info = tmp_get_font_size_method;
+        g_tmp_set_font_size_info = tmp_set_font_size_method;
+        g_tmp_get_font_size_min_info = tmp_get_font_size_min_method;
+        g_tmp_set_font_size_min_info = tmp_set_font_size_min_method;
+        g_tmp_get_font_size_max_info = tmp_get_font_size_max_method;
+        g_tmp_set_font_size_max_info = tmp_set_font_size_max_method;
+        g_tmp_get_auto_sizing_info = tmp_get_auto_sizing_method;
+        g_tmp_set_auto_sizing_info = tmp_set_auto_sizing_method;
         g_material_get_float_info = material_get_float_method;
         g_material_set_float_info = material_set_float_method;
         g_material_get_color_info = material_get_color_method;

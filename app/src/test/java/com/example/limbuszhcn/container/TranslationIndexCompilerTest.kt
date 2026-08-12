@@ -25,7 +25,6 @@ class TranslationIndexCompilerTest {
 
         assertEquals(mapOf("Sinner" to "罪人"), compiled.uniqueEntries)
         assertEquals("罪人", compiled.termEntries["Sinner"])
-        assertEquals("未被破坏且命中时", compiled.termEntries["破壊されずに命中時"])
         assertEquals(4, compiled.sourceRecordCount)
         assertEquals(1, compiled.conflictCount)
         assertEquals(0, compiled.dominantEntryCount)
@@ -49,6 +48,13 @@ class TranslationIndexCompilerTest {
             "<color=#d40000><s>長姉</s></color>",
             "<color=#d40000><s>长姊</s></color>"
         ))
+        compiler.add(record(
+            "Keyword.json",
+            "formatted-bracket-name",
+            "name",
+            "代行[テスト指令]",
+            "代行[测试指令]"
+        ))
 
         val compiled = compiler.compile("2026071001", "archive")
 
@@ -57,11 +63,12 @@ class TranslationIndexCompilerTest {
         assertEquals("攻击前", compiled.termEntries["攻撃前"])
         assertEquals("震颤", compiled.termEntries["振動"])
         assertEquals("长姊", compiled.termEntries["長姉"])
-        assertFalse(compiled.termEntries.containsKey("以上"))
+        assertEquals("测试指令", compiled.termEntries["テスト指令"])
+        assertEquals("或以上", compiled.termEntries["以上"])
         assertEquals(1, compiled.dominantEntryCount)
     }
 
-    /** 验证剧情、章节关联文本和解锁编号均进入 schema 7 显示字段策略。 */
+    /** 验证剧情、章节关联文本和解锁编号均进入 schema 8 显示字段策略。 */
     @Test
     fun includesVerifiedStoryAndUnlockDisplayFields() {
         val compiler = TranslationIndexCompiler().apply {
@@ -96,26 +103,40 @@ class TranslationIndexCompilerTest {
         assertEquals("?!>@!#$@!?!>#!#!", compiled.uniqueEntries["信号"])
     }
 
-    /** 验证已人工确认的术语错译与半日文条件在索引编译时被统一修正。 */
+    /** 验证格式化术语全部从下载包派生，并优先采用包内关键词词典。 */
     @Test
-    fun correctsReviewedTerminologyAndMixedJapaneseConditions() {
+    fun derivesFormattedTermsFromDownloadedGlossaries() {
         val compiler = TranslationIndexCompiler().apply {
-            add(record("Skill.json", "breath", "desc", "呼吸を得る", "获得喘息未定强度"))
+            // 普通页面即使重复使用同一日文，也不能压过 Bufs 中的正式关键词译名。
+            repeat(4) { index ->
+                add(record("Passives.json", "passive-$index", "name", "呼吸", "喘息未定"))
+            }
+            add(record("Bufs.json", "Breath", "name", "呼吸", "呼吸法"))
+            add(record("Bufs-a1c9p1.json", "KarmaOfIndexAlly", "name", "カルマ", "业"))
             add(record(
-                "Skill.json",
+                "Bufs-a1c9p3.json",
+                "StackRienSpecialSkill",
+                "name",
+                "代行[ヘルメス]",
+                "代行[赫尔墨斯]"
+            ))
+            add(record(
+                "Bufs-a1c9p3.json",
                 "coin-condition",
-                "content",
-                "[破壊されずに命中時]",
-                "[破坏されずに命中时]"
+                "desc",
+                "- 打撃ダメージを与える\n- 破壊されずに命中時、自身に呼吸を2付与",
+                "- 造成打击伤害\n- 未摧毁并命中时，使自身获得2层呼吸法"
             ))
         }
 
         val compiled = compiler.compile("2026080601", "archive")
 
-        assertEquals("获得呼吸法强度", compiled.uniqueEntries["呼吸を得る"])
-        assertEquals("[未被破坏且命中时]", compiled.uniqueEntries["[破壊されずに命中時]"])
-        assertEquals("未被破坏且命中时", compiled.termEntries["破壊されずに命中時"])
-        assertEquals("未被破坏且命中时", compiled.termEntries["破坏されずに命中时"])
+        assertEquals("呼吸法", compiled.uniqueEntries["呼吸"])
+        assertEquals("呼吸法", compiled.termEntries["呼吸"])
+        assertEquals("业", compiled.termEntries["カルマ"])
+        assertEquals("赫尔墨斯", compiled.termEntries["ヘルメス"])
+        assertEquals("未摧毁并命中时", compiled.termEntries["破壊されずに命中時"])
+        assertFalse(compiled.termEntries.containsKey("喘息未定"))
     }
 
     @Test
@@ -129,13 +150,13 @@ class TranslationIndexCompilerTest {
         val indexFile = TranslationIndexStore(root).activate(compiled)
 
         assertTrue(indexFile.exists())
-        assertTrue(indexFile.parent.fileName.toString().contains("-s7-"))
+        assertTrue(indexFile.parent.fileName.toString().contains("-s8-"))
         assertEquals(indexFile.toString().replace('\\', '/'), root.resolve("active-index.path").readText().trim())
         DataInputStream(indexFile.inputStream()).use { input ->
             assertEquals("LZTI1\u0000", String(input.readNBytes(6), Charsets.US_ASCII))
-            assertEquals(7, input.readInt())
+            assertEquals(8, input.readInt())
             assertEquals(1, input.readInt())
-            assertEquals(3, input.readInt())
+            assertEquals(1, input.readInt())
             assertEquals("Sinner", input.readSizedUtf8())
             assertEquals("罪人", input.readSizedUtf8())
             assertEquals("Sinner", input.readSizedUtf8())
@@ -145,7 +166,7 @@ class TranslationIndexCompilerTest {
             indexFile.parent.resolve("manifest.properties").inputStream().use(::load)
         }
         assertEquals("1", properties.getProperty("uniqueEntryCount"))
-        assertEquals("3", properties.getProperty("termEntryCount"))
+        assertEquals("1", properties.getProperty("termEntryCount"))
         assertEquals("1", properties.getProperty("sourceRecordCount"))
         assertEquals("0", properties.getProperty("conflictCount"))
     }

@@ -1950,6 +1950,47 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
             if (updated_pc != pc || updated_sp != sp) {
                 return;
             }
+#if defined(__NR_exit) && defined(__NR_gettid) && defined(__NR_getpid)
+            /*
+             * vivo V2314A / Android 13 的 v1.2 回归日志确认：AppSealing 后台 Thread-5
+             * 会在 +0x248d4 通过空对象读取回调，随后其下游 handler 调用被容器拦截的
+             * exit_group(139) 并原样返回。若继续恢复默认 SIGSEGV，会把一个保护库后台
+             * 线程故障升级为整个游戏进程闪退；若直接返回，又会重试同一条指令形成死循环。
+             *
+             * 这里只在基址、偏移、故障地址、寄存器、四条指令以及“非主线程”全部匹配
+             * 诊断现场时，用未经过 libc hook 的原始 exit 系统调用结束当前后台线程。
+             * 其他同步故障仍保留下面的默认终止语义，避免吞掉真实崩溃。
+             */
+            uintptr_t appsealing_base = g_limbus_appsealing_base;
+            long current_tid = limbus_signal_raw_syscall4(__NR_gettid, 0, 0, 0, 0);
+            long process_id = limbus_signal_raw_syscall4(__NR_getpid, 0, 0, 0, 0);
+            if (appsealing_base != 0
+                    && pc == appsealing_base + 0x248d4
+                    && address == 0x30
+                    && registers[0] == 0
+                    && current_tid > 0
+                    && process_id > 0
+                    && current_tid != process_id) {
+                const auto *instructions =
+                        reinterpret_cast<const volatile uint32_t *>(pc);
+                if (instructions[0] == 0xf9401802
+                        && instructions[1] == 0xaa1303e0
+                        && instructions[2] == 0xd63f0040
+                        && instructions[3] == 0xaa0003f6) {
+                    static const char isolated_message[] =
+                            "Limbus SIGSEGV guard: isolated confirmed AppSealing background fault\n";
+                    limbus_signal_raw_syscall4(
+                            __NR_write,
+                            STDERR_FILENO,
+                            reinterpret_cast<long>(isolated_message),
+                            sizeof(isolated_message) - 1,
+                            0);
+                    for (;;) {
+                        limbus_signal_raw_syscall4(__NR_exit, 0, 0, 0, 0);
+                    }
+                }
+            }
+#endif
             /*
              * 同步故障的下游处理器若原样返回，CPU 会再次执行同一条故障指令，
              * 形成 Issue #1 中每毫秒一次的 SIGSEGV/日志死循环。此时不能假装

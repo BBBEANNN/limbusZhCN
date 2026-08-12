@@ -63,27 +63,31 @@ internal data class CompiledTranslationIndex(
 internal class TranslationIndexCompiler {
     private val records = mutableListOf<TranslationIndexRecord>()
 
+    /** 保存一条由下载包配对记录派生的短术语及其来源优先级。 */
+    private data class TermCandidate(
+        val source: String,
+        val translation: String,
+        val priority: Int
+    )
+
     /**
      * 添加一条通过字段与编码质量校验的配对记录。
      *
      * @param record 待验证的日中显示文本记录。
      */
     fun add(record: TranslationIndexRecord) {
-        // 先统一已经人工确认的错译，确保完整索引、术语索引和输入摘要使用同一份结果。
-        val correctedRecord = record.copy(
-            translation = TranslationTextPolicy.correctKnownTranslation(record.translation)
-        )
         if (
-            !TranslationTextPolicy.isDisplayField(correctedRecord.field) ||
-            correctedRecord.source.isBlank() ||
-            correctedRecord.translation.isBlank() ||
-            correctedRecord.source == correctedRecord.translation ||
-            !TranslationTextPolicy.isUsableDisplayText(correctedRecord.source) ||
-            !TranslationTextPolicy.isUsableDisplayText(correctedRecord.translation)
+            !TranslationTextPolicy.isDisplayField(record.field) ||
+            record.source.isBlank() ||
+            record.translation.isBlank() ||
+            record.source == record.translation ||
+            !TranslationTextPolicy.isUsableDisplayText(record.source) ||
+            !TranslationTextPolicy.isUsableDisplayText(record.translation)
         ) {
             return
         }
-        records += correctedRecord
+        // 不维护宿主自定义译名；有效译文原样来自用户已下载并校验的汉化包。
+        records += record
     }
 
     /**
@@ -93,7 +97,7 @@ internal class TranslationIndexCompiler {
      * @param archiveSha256 汉化归档 SHA-256。
      * @param candidateSourceFileCount 候选译文 JSON 数量。
      * @param availableSourceFileCount 已找到官方日文对应文件的数量。
-     * @return 可写入 schema 7 二进制文件的不可变索引。
+     * @return 可写入 schema 8 二进制文件的不可变索引。
      */
     fun compile(
         version: String,
@@ -125,19 +129,33 @@ internal class TranslationIndexCompiler {
                 conflicts += 1
             }
         }
-        val termCandidates = mutableListOf<Pair<String, String>>()
+        val termCandidates = mutableListOf<TermCandidate>()
         sorted.forEach { record ->
+            val priority = termSourcePriority(record.path)
             if (TranslationTextPolicy.isTermField(record.field)) {
-                normalizedTerms(record.source, record.translation).forEach(termCandidates::add)
+                normalizedTerms(record.source, record.translation).forEach { (source, translation) ->
+                    termCandidates += TermCandidate(source, translation, priority)
+                }
+            }
+            if (TranslationTextPolicy.isStructuredDescriptionField(record.field)) {
+                normalizedLeadingClauseTerms(record.source, record.translation)
+                    .forEach { (source, translation) ->
+                        termCandidates += TermCandidate(source, translation, priority)
+                    }
             }
         }
-        termCandidates.groupBy { it.first }.toSortedMap().forEach { (source, pairs) ->
-            val translations = pairs.groupingBy { it.second }.eachCount()
-            resolveTranslation(translations)?.let { terms[source] = it }
-        }
-        // 人工核对的条件短语必须覆盖包内冲突结果，避免被更短的汉字术语拆成半日文句子。
-        TranslationTextPolicy.BUILT_IN_TERM_ENTRIES.forEach { (source, translation) ->
-            terms[source] = translation
+        termCandidates.groupBy(TermCandidate::source).toSortedMap().forEach { (source, candidates) ->
+            val highestPriority = candidates.maxOf(TermCandidate::priority)
+            val preferred = candidates.filter { candidate -> candidate.priority == highestPriority }
+            val translations = preferred.groupingBy(TermCandidate::translation).eachCount()
+            resolveTranslation(translations)?.let { translation ->
+                terms[source] = translation
+                if (highestPriority == CANONICAL_GLOSSARY_PRIORITY) {
+                    // TMP 最终只提供字符串、没有资源 ID。发生同文异译时，以下载包的
+                    // Buff/战斗关键词词典作为界面格式化后的唯一权威译名。
+                    unique[source] = translation
+                }
+            }
         }
         val digest = MessageDigest.getInstance("SHA-256")
         fun updateDigest(value: String) {
@@ -151,10 +169,6 @@ internal class TranslationIndexCompiler {
         sorted.forEach { record ->
             listOf(record.path, record.id, record.field, record.source, record.translation)
                 .forEach(::updateDigest)
-        }
-        TranslationTextPolicy.BUILT_IN_TERM_ENTRIES.forEach { (source, translation) ->
-            // 把内置术语策略纳入摘要，确保已有 schema 7 版本目录不会复用旧索引文件。
-            listOf("built-in-term", source, translation).forEach(::updateDigest)
         }
         return CompiledTranslationIndex(
             version = version,
@@ -181,42 +195,99 @@ internal class TranslationIndexCompiler {
         }
     }
 
-    private fun normalizedTerms(source: String, translation: String): Set<Pair<String, String>> {
-        fun stripPairedBrackets(value: String): String =
-            if (value.length >= 3 && value.first() == '[' && value.last() == ']') {
-                value.substring(1, value.length - 1)
-            } else {
-                value
-            }
-
-        fun candidate(sourceValue: String, translationValue: String): Pair<String, String>? {
-            val normalizedSource = stripPairedBrackets(sourceValue.trim())
-            val normalizedTranslation = stripPairedBrackets(translationValue.trim())
-            return (normalizedSource to normalizedTranslation).takeIf {
-                normalizedSource.isTermLike() && normalizedTranslation.isTermLike() &&
-                    normalizedSource != normalizedTranslation &&
-                    !normalizedTranslation.contains(normalizedSource)
-            }
-        }
-
-        return buildSet {
-            candidate(source, translation)?.let(::add)
-            candidate(
-                RICH_TEXT_TAG.replace(source, ""),
-                RICH_TEXT_TAG.replace(translation, "")
-            )?.let(::add)
+    private fun termSourcePriority(path: String): Int {
+        val fileName = path.substringAfterLast('/').substringAfterLast('\\').lowercase()
+        return when {
+            fileName.startsWith("bufs") || fileName.startsWith("battlekeywords") ->
+                CANONICAL_GLOSSARY_PRIORITY
+            "keyword" in fileName -> 2
+            else -> 1
         }
     }
 
-    private fun String.isTermLike(): Boolean {
+    private fun normalizedTerms(source: String, translation: String): Set<Pair<String, String>> {
+        return buildSet {
+            candidateTerm(source, translation)?.let(::add)
+            candidateTerm(
+                RICH_TEXT_TAG.replace(source, ""),
+                RICH_TEXT_TAG.replace(translation, "")
+            )?.let(::add)
+            val sourceBracketTerms = SQUARE_BRACKET_CONTENT.findAll(source)
+                .map { match -> match.groupValues[1] }
+                .toList()
+            val translationBracketTerms = SQUARE_BRACKET_CONTENT.findAll(translation)
+                .map { match -> match.groupValues[1] }
+                .toList()
+            if (sourceBracketTerms.size == translationBracketTerms.size) {
+                // 游戏格式化器可能只输出方括号内部的可见名称。同步派生内部术语，
+                // 让所有同类标签在格式化后仍能二次汉化，而不是只修某个页面或角色。
+                sourceBracketTerms.zip(translationBracketTerms).forEach { (sourceTerm, translationTerm) ->
+                    candidateTerm(sourceTerm, translationTerm)?.let(::add)
+                }
+            }
+        }
+    }
+
+    private fun normalizedLeadingClauseTerms(
+        source: String,
+        translation: String
+    ): Set<Pair<String, String>> {
+        val sourceLines = RICH_TEXT_TAG.replace(source, "").lines()
+        val translationLines = RICH_TEXT_TAG.replace(translation, "").lines()
+        if (sourceLines.size != translationLines.size) return emptySet()
+        return buildSet {
+            sourceLines.zip(translationLines).forEach { (sourceLine, translationLine) ->
+                // 技能说明通常以“条件，效果”逐行对齐。只取第一个标点前的条件，
+                // 译名完全来自下载包，供游戏把标签格式化成日文后再次命中。
+                val sourceClause = sourceLine.leadingClause()
+                val translationClause = translationLine.leadingClause()
+                if (sourceClause != null && translationClause != null) {
+                    candidateTerm(sourceClause, translationClause)?.let(::add)
+                }
+            }
+        }
+    }
+
+    private fun candidateTerm(
+        sourceValue: String,
+        translationValue: String
+    ): Pair<String, String>? {
+        val normalizedSource = sourceValue.trim().stripPairedBrackets()
+        val normalizedTranslation = translationValue.trim().stripPairedBrackets()
+        return (normalizedSource to normalizedTranslation).takeIf {
+            normalizedSource.isTermLike(minimumCodePoints = 2) &&
+                normalizedTranslation.isTermLike(minimumCodePoints = 1) &&
+                normalizedSource != normalizedTranslation
+        }
+    }
+
+    private fun String.leadingClause(): String? {
+        val normalized = replace(LEADING_BULLET, "").trim()
+        val delimiter = normalized.indexOfFirst { character -> character in CLAUSE_DELIMITERS }
+        if (delimiter !in 2..32) return null
+        return normalized.substring(0, delimiter)
+    }
+
+    private fun String.stripPairedBrackets(): String =
+        if (length >= 3 && first() == '[' && last() == ']') {
+            substring(1, length - 1)
+        } else {
+            this
+        }
+
+    private fun String.isTermLike(minimumCodePoints: Int): Boolean {
         val codePoints = codePointCount(0, length)
-        return codePoints in 2..16 && none {
+        return codePoints in minimumCodePoints..16 && none {
             it.isWhitespace() || it == '<' || it == '>' || it == '{' || it == '}' || it == '%'
         }
     }
 
     companion object {
         private val RICH_TEXT_TAG = Regex("<[^>]+>")
+        private val SQUARE_BRACKET_CONTENT = Regex("\\[([^\\[\\]]+)]")
+        private val LEADING_BULLET = Regex("^\\s*[-·•]\\s*")
+        private val CLAUSE_DELIMITERS = setOf('、', '，', ',', '：', ':')
+        private const val CANONICAL_GLOSSARY_PRIORITY = 3
     }
 }
 
@@ -335,7 +406,8 @@ internal class TranslationIndexStore(private val root: Path) {
         const val ACTIVE_POINTER = "active-index.path"
         const val INDEX_FILE = "index.bin"
         private const val MANIFEST_FILE = "manifest.properties"
-        private const val INDEX_SCHEMA = 7
+        // schema 8 会强制重建旧索引，使包内词典优先级与条件术语派生立即生效。
+        private const val INDEX_SCHEMA = 8
         private val INDEX_MAGIC = byteArrayOf('L'.code.toByte(), 'Z'.code.toByte(), 'T'.code.toByte(), 'I'.code.toByte(), '1'.code.toByte(), 0)
     }
 }

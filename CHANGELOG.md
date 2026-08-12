@@ -10,8 +10,8 @@ All notable changes to this project will be documented in this file.
 - Add an in-app, per-process rolling diagnostic log with uncaught-exception capture, automatic redaction, bounded retention, historical exit data, and a ready-to-copy GitHub Issue template in the exported ZIP.
 - Add a device compatibility card covering Android/API level, arm64 availability, runtime bitness, kernel page size, low-RAM state, battery optimization, and OEM background settings for vivo/iQOO and other common Android brands.
 - Expand install compatibility from Android 12 / API 31 down to Android 8.0 / API 26, matching the current Limbus Company package minimum while keeping the game-required arm64 runtime boundary.
-- Add schema-7 runtime text policy coverage for `story`, `relatedChapterText`, and `openConditionNumber`, and reject definitively corrupted Unicode/control-code translations while preserving Japanese source text.
-- Add translated TMP material-style inheritance and bounded multiline spacing compensation so coin-skill text retains its black outline and adjacent Chinese rows do not overlap.
+- Add schema-8 runtime text policy coverage for `story`, `relatedChapterText`, and `openConditionNumber`, and reject definitively corrupted Unicode/control-code translations while preserving Japanese source text.
+- Add per-component TMP font-size and auto-size state capture so translated labels can fit fixed game rectangles and restore their original layout when recycled.
 - Add the GPL-3.0 project license and a third-party notice inventory for the public source release.
 - Add a Limbus Activity classloader probe and prefer the bound `LoadedApk` classloader when replacing VirtualApp stub activities, so AppSealing-added payload dex visibility can be inspected during Unity Activity creation.
 - Add Limbus thread context classloader diagnostics during application bind and Unity Activity lifecycle entry, verifying whether Firebase/Unity JNI class lookups can see the AppSealing-mounted payload dex.
@@ -94,11 +94,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Isolate the confirmed `libcovault-appsec.so +0x248d4` Android 13 background-thread fault instead of escalating it into a whole-game SIGSEGV, fixing the v1.2 launch-after-logo regression reported in Issue #1.
 - Skip the legacy ART `jmethodID` VM hook for containerized microG Services/FakeStore, preventing Android 13 login helper processes from crashing in `libv++_64.so::hookAndroidVM()`.
 - Stop unhandled synchronous SIGSEGV handlers from returning to an unchanged faulting context and flooding logcat, and preserve sanitized native tombstones as protobuf instead of corrupting them through UTF-8 conversion.
-- Fix automatically wrapped Chinese skill descriptions overlapping by applying the bounded TMP line-spacing floor before layout even when the source contains no literal newline.
+- Fix Chinese card names, tabs, skill titles and descriptions overlapping or clipping by auto-sizing short labels, slightly reducing long-body text, and preserving the game's original line spacing.
 - Preserve translated-font provenance by exact generated text content, so IL2CPP string copies no longer fall back to mixed Japanese/Chinese glyph faces.
-- Correct the reviewed `喘息未定` terminology to `呼吸法` and translate the mixed Japanese condition fragment `破壊されずに命中時` as `未被破坏且命中时`.
+- Derive formatted keyword names, bracket contents and leading skill conditions from the downloaded translation package, prioritize its `Bufs*`/`BattleKeywords*` glossaries over conflicting page text, and support one-character or expanding Chinese terms without repeated replacement.
+- Reject partial embedded-term results that still contain Japanese kana, preventing the runtime fallback from creating new mixed Chinese/Japanese fragments when a complete package mapping is unavailable.
+- Keep the Chinese font's own SDF material instead of copying incompatible outline parameters from the original font, preventing broken or filled-in glyph strokes.
 - Allow screenshots of the Limbus guest by clearing only its `FLAG_SECURE` window bit during Activity resume and window-session add/relayout calls.
 - Prefer Limbus' Firebase resource jars before the host APK in the Firebase C++ fallback loader, so real Firebase Auth SDK classes are not shadowed by the container's minimal shim classes during Google sign-in.
 - Preserve Limbus Credentials `HiddenActivity` GMS Parcelable and Binder extras by launching it through a client-local VirtualApp stub instead of unmarshalling the request in the VAMS server process.

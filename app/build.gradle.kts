@@ -23,9 +23,9 @@ android {
         // VirtualApp 库自身最低支持 API 23，但应用使用了 java.time，因此安全下限设为 API 26。
         minSdk = 26
         targetSdk = 35
-        // v1.2 修复登录回调、辅助进程崩溃、字体重叠、错译残留与游戏截图限制。
-        versionCode = 3
-        versionName = "1.2"
+        // v1.3 以下载汉化包为唯一译名来源，并优先保证中文字体完整、清晰、不重叠。
+        versionCode = 4
+        versionName = "1.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

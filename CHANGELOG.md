@@ -94,6 +94,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Stabilize Chinese TMP rendering by rebinding the matching font material whenever the runtime switches fonts, preventing intermittent broken glyphs and garbled labels.
+- Preserve readable game UI layouts with single-line auto-sizing and ellipsis for short labels, original-size multiline descriptions, and a 35-point formation-list label.
+- Apply a consistent 150% line height to personality-card titles across formation, arrangement, and selection pages.
+- Restore personality-title line breaks from the downloaded translation package when individual game pages flatten those breaks into spaces or remove them; ambiguous package-derived matches are left unchanged.
 - Isolate the confirmed `libcovault-appsec.so +0x248d4` Android 13 background-thread fault instead of escalating it into a whole-game SIGSEGV, fixing the v1.2 launch-after-logo regression reported in Issue #1.
 - Skip the legacy ART `jmethodID` VM hook for containerized microG Services/FakeStore, preventing Android 13 login helper processes from crashing in `libv++_64.so::hookAndroidVM()`.
 - Stop unhandled synchronous SIGSEGV handlers from returning to an unchanged faulting context and flooding logcat, and preserve sanitized native tombstones as protobuf instead of corrupting them through UTF-8 conversion.

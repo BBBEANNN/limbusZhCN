@@ -40,6 +40,9 @@ pthread_mutex_t g_font_state_lock = PTHREAD_MUTEX_INITIALIZER;
 char g_active_pointer[PATH_MAX] = {};
 std::unordered_map<std::string, std::string> g_index;
 std::unordered_map<std::string, std::string> g_terms;
+// 部分人格列表会把汉化包标题中的换行压成空格或直接移除；该索引只保存由包内译文
+// 推导出的原始分行，让运行时兼容不同页面，而无需硬编码任何人格名称或译文。
+std::unordered_map<std::string, std::string> g_package_line_breaks;
 struct TermTrieNode {
     std::unordered_map<unsigned char, size_t> children;
     const std::string *source = nullptr;
@@ -52,6 +55,7 @@ bool g_probe_started = false;
 bool g_hook_installed = false;
 bool g_font_attempted = false;
 void *g_tmp_font_asset = nullptr;
+void *g_ui_font = nullptr;
 // 译文来源按 UTF-8 内容登记，避免游戏复制 IL2CPP String 后丢失仅依赖对象地址的字体标记。
 std::unordered_set<std::string> g_translated_managed_texts;
 struct TmpComponentState {
@@ -67,8 +71,30 @@ struct TmpComponentState {
     bool has_font_size_max = false;
     bool auto_sizing = false;
     bool has_auto_sizing = false;
+    bool word_wrapping = false;
+    bool has_word_wrapping = false;
+    int32_t overflow_mode = 0;
+    bool has_overflow_mode = false;
 };
 std::unordered_map<void *, TmpComponentState> g_original_tmp_states;
+struct UiComponentState {
+    void *font = nullptr;
+    float line_spacing = 1.0f;
+    bool has_line_spacing = false;
+    int32_t font_size = 0;
+    bool has_font_size = false;
+    int32_t resize_min_size = 0;
+    bool has_resize_min_size = false;
+    int32_t resize_max_size = 0;
+    bool has_resize_max_size = false;
+    bool resize_best_fit = false;
+    bool has_resize_best_fit = false;
+    int32_t horizontal_overflow = 0;
+    bool has_horizontal_overflow = false;
+    int32_t vertical_overflow = 0;
+    bool has_vertical_overflow = false;
+};
+std::unordered_map<void *, UiComponentState> g_original_ui_states;
 uint64_t g_translation_hits = 0;
 char g_il2cpp_path[PATH_MAX] = {};
 
@@ -92,6 +118,7 @@ typedef void *(*il2cpp_init_fn)(const char *);
 typedef void *(*dlsym_fn)(void *, const char *);
 typedef void (*tmp_set_font_fn)(void *, void *, const void *);
 typedef void *(*tmp_get_font_fn)(void *, const void *);
+typedef void (*tmp_set_material_fn)(void *, void *, const void *);
 typedef void (*tmp_set_text_fn)(void *, void *, const void *);
 typedef void (*tmp_set_text_string_fn)(void *, void *, bool, const void *);
 typedef int32_t (*get_language_fn)(void *, const void *);
@@ -113,6 +140,8 @@ object_unbox_fn g_object_unbox = nullptr;
 class_get_method_global_fn g_class_get_method = nullptr;
 tmp_set_font_fn g_tmp_set_font = nullptr;
 tmp_get_font_fn g_tmp_get_font = nullptr;
+tmp_set_material_fn g_original_tmp_set_shared_material = nullptr;
+tmp_set_material_fn g_original_tmp_set_material = nullptr;
 tmp_set_text_fn g_original_tmp_set_text = nullptr;
 tmp_set_text_fn g_original_tmp_set_text_one = nullptr;
 tmp_set_text_fn g_original_ui_set_text = nullptr;
@@ -136,6 +165,32 @@ const void *g_tmp_get_font_size_max_info = nullptr;
 const void *g_tmp_set_font_size_max_info = nullptr;
 const void *g_tmp_get_auto_sizing_info = nullptr;
 const void *g_tmp_set_auto_sizing_info = nullptr;
+const void *g_tmp_get_word_wrapping_info = nullptr;
+const void *g_tmp_set_word_wrapping_info = nullptr;
+const void *g_tmp_get_overflow_mode_info = nullptr;
+const void *g_tmp_set_overflow_mode_info = nullptr;
+const void *g_tmp_get_rect_transform_info = nullptr;
+const void *g_ui_get_font_info = nullptr;
+const void *g_ui_set_font_info = nullptr;
+const void *g_ui_get_line_spacing_info = nullptr;
+const void *g_ui_set_line_spacing_info = nullptr;
+const void *g_ui_get_font_size_info = nullptr;
+const void *g_ui_set_font_size_info = nullptr;
+const void *g_ui_get_resize_min_size_info = nullptr;
+const void *g_ui_set_resize_min_size_info = nullptr;
+const void *g_ui_get_resize_max_size_info = nullptr;
+const void *g_ui_set_resize_max_size_info = nullptr;
+const void *g_ui_get_resize_best_fit_info = nullptr;
+const void *g_ui_set_resize_best_fit_info = nullptr;
+const void *g_ui_get_horizontal_overflow_info = nullptr;
+const void *g_ui_set_horizontal_overflow_info = nullptr;
+const void *g_ui_get_vertical_overflow_info = nullptr;
+const void *g_ui_set_vertical_overflow_info = nullptr;
+const void *g_ui_get_rect_transform_info = nullptr;
+const void *g_rect_transform_get_rect_info = nullptr;
+const void *g_object_get_name_info = nullptr;
+const void *g_component_get_transform_info = nullptr;
+const void *g_transform_get_parent_info = nullptr;
 const void *g_material_get_float_info = nullptr;
 const void *g_material_set_float_info = nullptr;
 const void *g_material_get_color_info = nullptr;
@@ -158,6 +213,8 @@ std::atomic<uint32_t> g_language_hook_hits{0};
 std::atomic<uint64_t> g_acquisition_hits{0};
 std::atomic<uint64_t> g_nested_list_hits{0};
 std::atomic<uint64_t> g_tmp_primary_font_switches{0};
+std::atomic<uint64_t> g_ui_primary_font_switches{0};
+std::atomic<uint64_t> g_layout_decisions{0};
 
 bool append_utf8(uint32_t codepoint, std::string *output) {
     if (codepoint <= 0x7f) {
@@ -422,6 +479,129 @@ std::string apply_dante_line_height(const std::string &translation) {
     return output;
 }
 
+std::string apply_uniform_line_height(const std::string &text, int32_t percentage) {
+    std::string output;
+    output.reserve(text.size() + 96);
+    std::string line_height_tag = "<line-height=" + std::to_string(percentage) + "%>\n";
+    for (char character : text) {
+        if (character != '\n') {
+            output.push_back(character);
+            continue;
+        }
+        // TMP 在换行符前读取当前 line-height；换行后立即恢复 100%，避免标签
+        // 继续影响同一组件之外的自动布局计算。
+        output += line_height_tag;
+        output += "<line-height=100%>";
+    }
+    return output;
+}
+
+float personality_title_character_width(uint32_t codepoint) {
+    // 拉丁字母、数字与标点在当前中文字体中的实际宽度明显小于一个汉字；
+    // 用近似字宽而不是字节数计算，避免把 LCA、E.G.O 等缩写过度拆行。
+    if (codepoint == ' ') return 0.35f;
+    if (codepoint <= 0x7f) return 0.55f;
+    return 1.0f;
+}
+
+std::vector<std::string> split_utf8_codepoints(const std::string &text) {
+    std::vector<std::string> codepoints;
+    for (size_t offset = 0; offset < text.size();) {
+        unsigned char lead = static_cast<unsigned char>(text[offset]);
+        size_t length = 1;
+        if ((lead & 0xe0) == 0xc0) length = 2;
+        else if ((lead & 0xf0) == 0xe0) length = 3;
+        else if ((lead & 0xf8) == 0xf0) length = 4;
+        if (offset + length > text.size()) length = 1;
+        codepoints.emplace_back(text.substr(offset, length));
+        offset += length;
+    }
+    return codepoints;
+}
+
+uint32_t first_utf8_codepoint(const std::string &text) {
+    if (text.empty()) return 0;
+    const unsigned char *bytes = reinterpret_cast<const unsigned char *>(text.data());
+    if ((bytes[0] & 0x80) == 0) return bytes[0];
+    if ((bytes[0] & 0xe0) == 0xc0 && text.size() >= 2) {
+        return ((bytes[0] & 0x1f) << 6) | (bytes[1] & 0x3f);
+    }
+    if ((bytes[0] & 0xf0) == 0xe0 && text.size() >= 3) {
+        return ((bytes[0] & 0x0f) << 12) | ((bytes[1] & 0x3f) << 6) |
+               (bytes[2] & 0x3f);
+    }
+    if ((bytes[0] & 0xf8) == 0xf0 && text.size() >= 4) {
+        return ((bytes[0] & 0x07) << 18) | ((bytes[1] & 0x3f) << 12) |
+               ((bytes[2] & 0x3f) << 6) | (bytes[3] & 0x3f);
+    }
+    return bytes[0];
+}
+
+std::vector<std::string> wrap_personality_title_line(const std::string &line,
+                                                     float maximum_width) {
+    float total_width = 0.0f;
+    for (const std::string &codepoint : split_utf8_codepoints(line)) {
+        total_width += personality_title_character_width(first_utf8_codepoint(codepoint));
+    }
+    // 汉化包分行拥有最高优先级：未超宽的原始行原样保留；超宽但没有空格的行
+    // 也不按汉字硬拆，避免运行时自行改变译者确定的名称结构。
+    if (total_width <= maximum_width || line.find(' ') == std::string::npos) {
+        return {line};
+    }
+    std::vector<std::string> result;
+    std::vector<std::string> codepoints = split_utf8_codepoints(line);
+    size_t start = 0;
+    while (start < codepoints.size()) {
+        float width = 0.0f;
+        size_t end = start;
+        size_t last_space = std::string::npos;
+        while (end < codepoints.size()) {
+            uint32_t codepoint = first_utf8_codepoint(codepoints[end]);
+            float next_width = personality_title_character_width(codepoint);
+            if (end > start && width + next_width > maximum_width) break;
+            width += next_width;
+            if (codepoint == ' ') last_space = end;
+            ++end;
+        }
+        if (end < codepoints.size() && last_space != std::string::npos && last_space > start) {
+            end = last_space;
+        } else if (end < codepoints.size()) {
+            // 当前剩余片段找不到可用空格时保留整段，不在汉字中间制造新换行。
+            end = codepoints.size();
+        }
+        std::string wrapped;
+        for (size_t index = start; index < end; ++index) wrapped += codepoints[index];
+        while (!wrapped.empty() && wrapped.back() == ' ') wrapped.pop_back();
+        if (!wrapped.empty()) result.push_back(wrapped);
+        start = end;
+        while (start < codepoints.size() && codepoints[start] == " ") ++start;
+    }
+    if (result.empty()) result.push_back(line);
+    return result;
+}
+
+std::string reflow_personality_title(const std::string &text, size_t *line_count) {
+    std::vector<std::string> lines;
+    size_t start = 0;
+    while (start <= text.size()) {
+        size_t end = text.find('\n', start);
+        std::string line = text.substr(start, end == std::string::npos ?
+                std::string::npos : end - start);
+        // 230 宽、35 字号的人格卡可稳定容纳约 8.4 个等宽汉字；优先在包内空格处断行。
+        std::vector<std::string> wrapped = wrap_personality_title_line(line, 8.4f);
+        lines.insert(lines.end(), wrapped.begin(), wrapped.end());
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    if (line_count != nullptr) *line_count = lines.size();
+    std::string output;
+    for (size_t index = 0; index < lines.size(); ++index) {
+        if (index > 0) output.push_back('\n');
+        output += lines[index];
+    }
+    return output;
+}
+
 void *translate_managed_string(void *managed_text) {
     if (managed_text == nullptr || g_string_length == nullptr || g_string_chars == nullptr) {
         return managed_text;
@@ -682,6 +862,18 @@ bool ensure_tmp_font() {
             g_tmp_font_asset = g_runtime_invoke(
                     g_create_tmp_font_info, nullptr, asset_args, &exception);
         }
+        // 少数旧界面仍使用 UnityEngine.UI.Text，TMP_FontAsset 无法直接赋给它们。
+        // Android 的 sans-serif 是系统复合字体族，会按字符回退到设备内置中文字体，
+        // 因而可作为旧文本组件的稳定中文主字体，避免继续采样原日文字体的缺字方块。
+        void *ui_exception = nullptr;
+        void *ui_font_name = new_managed_string("sans-serif");
+        int32_t ui_font_size = 32;
+        void *ui_font_args[] = {ui_font_name, &ui_font_size};
+        if (ui_font_name != nullptr && g_create_dynamic_font_info != nullptr &&
+            g_runtime_invoke != nullptr) {
+            g_ui_font = g_runtime_invoke(
+                    g_create_dynamic_font_info, nullptr, ui_font_args, &ui_exception);
+        }
         void *fallback_list = nullptr;
         void *add_exception = nullptr;
         if (g_tmp_font_asset != nullptr && exception == nullptr &&
@@ -702,6 +894,8 @@ bool ensure_tmp_font() {
         LT_LOGI("Dynamic CJK TMP font creation path=%s face=%d tmpFont=%p exception=%p",
                 font_file.c_str(), face_index,
                 g_tmp_font_asset, exception);
+        LT_LOGI("Dynamic CJK UI font creation family=sans-serif size=%d uiFont=%p exception=%p",
+                ui_font_size, g_ui_font, ui_exception);
     }
     bool ready = g_tmp_font_asset != nullptr;
     pthread_mutex_unlock(&g_lock);
@@ -751,6 +945,26 @@ void invoke_bool_setter(const void *method_info, void *instance, bool value) {
     g_runtime_invoke(method_info, instance, args, &exception);
 }
 
+bool invoke_int_getter(const void *method_info, void *instance, int32_t *value) {
+    if (method_info == nullptr || instance == nullptr || value == nullptr ||
+        g_runtime_invoke == nullptr || g_object_unbox == nullptr) {
+        return false;
+    }
+    void *exception = nullptr;
+    void *boxed = g_runtime_invoke(method_info, instance, nullptr, &exception);
+    void *unboxed = exception == nullptr && boxed != nullptr ? g_object_unbox(boxed) : nullptr;
+    if (unboxed == nullptr) return false;
+    memcpy(value, unboxed, sizeof(*value));
+    return true;
+}
+
+void invoke_int_setter(const void *method_info, void *instance, int32_t value) {
+    if (method_info == nullptr || instance == nullptr || g_runtime_invoke == nullptr) return;
+    void *args[] = {&value};
+    void *exception = nullptr;
+    g_runtime_invoke(method_info, instance, args, &exception);
+}
+
 void *invoke_object_getter(const void *method_info, void *instance) {
     if (method_info == nullptr || instance == nullptr || g_runtime_invoke == nullptr) return nullptr;
     void *exception = nullptr;
@@ -763,6 +977,57 @@ void invoke_object_setter(const void *method_info, void *instance, void *value) 
     void *args[] = {value};
     void *exception = nullptr;
     g_runtime_invoke(method_info, instance, args, &exception);
+}
+
+struct ComponentRect {
+    float width = 0.0f;
+    float height = 0.0f;
+    bool valid = false;
+};
+
+ComponentRect read_component_rect(void *instance, const void *get_rect_transform_info) {
+    ComponentRect result;
+    if (instance == nullptr || get_rect_transform_info == nullptr ||
+        g_rect_transform_get_rect_info == nullptr || g_runtime_invoke == nullptr ||
+        g_object_unbox == nullptr) {
+        return result;
+    }
+    void *rect_transform = invoke_object_getter(get_rect_transform_info, instance);
+    if (rect_transform == nullptr) return result;
+    void *exception = nullptr;
+    void *boxed_rect = g_runtime_invoke(
+            g_rect_transform_get_rect_info, rect_transform, nullptr, &exception);
+    void *unboxed_rect = exception == nullptr && boxed_rect != nullptr ?
+            g_object_unbox(boxed_rect) : nullptr;
+    if (unboxed_rect == nullptr) return result;
+    // UnityEngine.Rect 的顺序为 x、y、width、height；这里只读取排版需要的后两个值。
+    float rect_values[4] = {};
+    memcpy(rect_values, unboxed_rect, sizeof(rect_values));
+    result.width = rect_values[2];
+    result.height = rect_values[3];
+    result.valid = result.width > 0.0f && result.height > 0.0f &&
+            result.width < 100000.0f && result.height < 100000.0f;
+    return result;
+}
+
+std::string read_unity_object_name(void *instance) {
+    std::string name;
+    void *managed_name = invoke_object_getter(g_object_get_name_info, instance);
+    if (managed_name == nullptr || g_string_length == nullptr || g_string_chars == nullptr) {
+        return name;
+    }
+    int32_t length = g_string_length(managed_name);
+    if (length < 0 || length > 1024 ||
+        !utf16_to_utf8(g_string_chars(managed_name), length, &name)) {
+        name.clear();
+    }
+    return name;
+}
+
+std::string read_unity_parent_name(void *component) {
+    void *transform = invoke_object_getter(g_component_get_transform_info, component);
+    void *parent = invoke_object_getter(g_transform_get_parent_info, transform);
+    return read_unity_object_name(parent);
 }
 
 struct MaterialOutlineStyle {
@@ -840,6 +1105,10 @@ TmpComponentState capture_tmp_component_state(void *instance, void *font) {
             g_tmp_get_font_size_max_info, instance, &candidate.font_size_max);
     candidate.has_auto_sizing = invoke_bool_getter(
             g_tmp_get_auto_sizing_info, instance, &candidate.auto_sizing);
+    candidate.has_word_wrapping = invoke_bool_getter(
+            g_tmp_get_word_wrapping_info, instance, &candidate.word_wrapping);
+    candidate.has_overflow_mode = invoke_int_getter(
+            g_tmp_get_overflow_mode_info, instance, &candidate.overflow_mode);
     pthread_mutex_lock(&g_font_state_lock);
     auto inserted = g_original_tmp_states.emplace(instance, candidate);
     TmpComponentState state = inserted.first->second;
@@ -854,6 +1123,30 @@ bool find_tmp_component_state(void *instance, TmpComponentState *state) {
     if (found && state != nullptr) *state = saved->second;
     pthread_mutex_unlock(&g_font_state_lock);
     return found;
+}
+
+void *translated_tmp_material(void *instance, void *requested_material) {
+    TmpComponentState state;
+    if (instance == nullptr || !find_tmp_component_state(instance, &state) ||
+        g_tmp_get_font == nullptr ||
+        g_tmp_get_font(instance, g_tmp_get_font_info) != g_tmp_font_asset) {
+        return requested_material;
+    }
+    // 游戏会在页签选择、E.G.O 等级切换和角色刷新时重新写入原日文字体材质。
+    // 材质仍指向旧图集时，即使文本和中文字体正确，也会随机显示成黑块、黄块或碎字。
+    void *font_material = invoke_object_getter(
+            g_tmp_font_get_material_info, g_tmp_font_asset);
+    return font_material == nullptr ? requested_material : font_material;
+}
+
+void replacement_tmp_set_shared_material(void *instance, void *material, const void *method) {
+    g_original_tmp_set_shared_material(
+            instance, translated_tmp_material(instance, material), method);
+}
+
+void replacement_tmp_set_material(void *instance, void *material, const void *method) {
+    g_original_tmp_set_material(
+            instance, translated_tmp_material(instance, material), method);
 }
 
 void restore_tmp_component_state(void *instance) {
@@ -879,6 +1172,12 @@ void restore_tmp_component_state(void *instance) {
     if (state.has_auto_sizing) {
         invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, state.auto_sizing);
     }
+    if (state.has_word_wrapping) {
+        invoke_bool_setter(g_tmp_set_word_wrapping_info, instance, state.word_wrapping);
+    }
+    if (state.has_overflow_mode) {
+        invoke_int_setter(g_tmp_set_overflow_mode_info, instance, state.overflow_mode);
+    }
     if (state.has_font_size_min) {
         invoke_float_setter(g_tmp_set_font_size_min_info, instance, state.font_size_min);
     }
@@ -887,6 +1186,77 @@ void restore_tmp_component_state(void *instance) {
     }
     if (state.has_font_size) {
         invoke_float_setter(g_tmp_set_font_size_info, instance, state.font_size);
+    }
+}
+
+UiComponentState capture_ui_component_state(void *instance) {
+    UiComponentState candidate;
+    candidate.font = invoke_object_getter(g_ui_get_font_info, instance);
+    candidate.has_line_spacing = invoke_float_getter(
+            g_ui_get_line_spacing_info, instance, &candidate.line_spacing);
+    candidate.has_font_size = invoke_int_getter(
+            g_ui_get_font_size_info, instance, &candidate.font_size);
+    candidate.has_resize_min_size = invoke_int_getter(
+            g_ui_get_resize_min_size_info, instance, &candidate.resize_min_size);
+    candidate.has_resize_max_size = invoke_int_getter(
+            g_ui_get_resize_max_size_info, instance, &candidate.resize_max_size);
+    candidate.has_resize_best_fit = invoke_bool_getter(
+            g_ui_get_resize_best_fit_info, instance, &candidate.resize_best_fit);
+    candidate.has_horizontal_overflow = invoke_int_getter(
+            g_ui_get_horizontal_overflow_info, instance, &candidate.horizontal_overflow);
+    candidate.has_vertical_overflow = invoke_int_getter(
+            g_ui_get_vertical_overflow_info, instance, &candidate.vertical_overflow);
+    pthread_mutex_lock(&g_font_state_lock);
+    auto inserted = g_original_ui_states.emplace(instance, candidate);
+    UiComponentState state = inserted.first->second;
+    pthread_mutex_unlock(&g_font_state_lock);
+    return state;
+}
+
+bool find_ui_component_state(void *instance, UiComponentState *state) {
+    pthread_mutex_lock(&g_font_state_lock);
+    auto saved = g_original_ui_states.find(instance);
+    bool found = saved != g_original_ui_states.end();
+    if (found && state != nullptr) *state = saved->second;
+    pthread_mutex_unlock(&g_font_state_lock);
+    return found;
+}
+
+void restore_ui_component_state(void *instance) {
+    UiComponentState state;
+    bool restore = false;
+    pthread_mutex_lock(&g_font_state_lock);
+    auto saved = g_original_ui_states.find(instance);
+    if (saved != g_original_ui_states.end()) {
+        state = saved->second;
+        g_original_ui_states.erase(saved);
+        restore = true;
+    }
+    pthread_mutex_unlock(&g_font_state_lock);
+    if (!restore) return;
+    // 列表和页签会复用旧 UI.Text；离开中文文本时恢复原设置，避免影响未汉化资源。
+    if (state.font != nullptr) invoke_object_setter(g_ui_set_font_info, instance, state.font);
+    if (state.has_line_spacing) {
+        invoke_float_setter(g_ui_set_line_spacing_info, instance, state.line_spacing);
+    }
+    if (state.has_resize_best_fit) {
+        invoke_bool_setter(g_ui_set_resize_best_fit_info, instance, state.resize_best_fit);
+    }
+    if (state.has_resize_min_size) {
+        invoke_int_setter(g_ui_set_resize_min_size_info, instance, state.resize_min_size);
+    }
+    if (state.has_resize_max_size) {
+        invoke_int_setter(g_ui_set_resize_max_size_info, instance, state.resize_max_size);
+    }
+    if (state.has_horizontal_overflow) {
+        invoke_int_setter(
+                g_ui_set_horizontal_overflow_info, instance, state.horizontal_overflow);
+    }
+    if (state.has_vertical_overflow) {
+        invoke_int_setter(g_ui_set_vertical_overflow_info, instance, state.vertical_overflow);
+    }
+    if (state.has_font_size) {
+        invoke_int_setter(g_ui_set_font_size_info, instance, state.font_size);
     }
 }
 
@@ -920,30 +1290,74 @@ void apply_translated_tmp_style(void *instance, void *managed_text,
         return;
     }
 
-    // 中文字体使用自身的默认 SDF 材质，不再复制原字体描边。不同字体图集的描边参数
-    // 尺度并不兼容，强行继承会让细笔画糊成碎块；视觉特效留到可读性稳定后再恢复。
-    if (state.has_line_spacing) {
-        // 原实现额外抬高行距会让滚动区末行被裁切。中文字体本身已有完整行高，保留原值即可。
-        invoke_float_setter(g_tmp_set_line_spacing_info, instance, state.line_spacing);
-    }
     if (!state.has_font_size || state.font_size <= 0.0f) return;
 
     size_t visible_length = count_visible_codepoints(text);
-    bool single_line_candidate = text.find('\n') == std::string::npos &&
-            text.find('\r') == std::string::npos && visible_length <= 48;
-    if (single_line_candidate) {
-        // 卡牌名、页签和技能标题通常使用固定矩形。启用 TMP 自适应并下调字号上限，
-        // 优先把完整中文收进原矩形，避免相邻组件互相覆盖或只露出半个字。
-        float scale = visible_length <= 8 ? 0.94f : (visible_length <= 20 ? 0.86f : 0.78f);
-        float maximum = state.font_size * scale;
-        float minimum = std::min(maximum, std::max(6.0f, state.font_size * 0.55f));
+    bool has_explicit_break = text.find('\n') != std::string::npos ||
+            text.find('\r') != std::string::npos;
+    ComponentRect rect = read_component_rect(instance, g_tmp_get_rect_transform_info);
+    bool short_text = visible_length <= 48;
+    std::string component_name;
+    std::string parent_name;
+    bool needs_component_identity = has_explicit_break ||
+            (rect.width > 0.0f && rect.width < 140.0f && rect.height <= 0.0f);
+    if (needs_component_identity) {
+        component_name = read_unity_object_name(instance);
+        parent_name = read_unity_parent_name(instance);
+    }
+    // 编队页、人格排列页与人格选择页会复用同名文本组件，但父节点名称并不一致。
+    // 使用精确组件名覆盖三类页面，避免“公主”等包内已有换行只在部分页面生效。
+    bool personality_group_name = component_name == "[Text]GroupName";
+    bool formation_deck_label = component_name == "[Text]Deck" &&
+            parent_name == "[Image]Mask";
+    bool single_line = short_text && !has_explicit_break;
+
+    if (single_line) {
+        // 页签、技能名和横幅必须保持单行。之前只启用自动字号却没有关闭换行，
+        // TMP 会先把中文拆成数行，再被一行高的遮罩裁成黄块或黑块。
+        invoke_bool_setter(g_tmp_set_word_wrapping_info, instance, false);
+        // Ellipsis 与自动字号配合：先在可读字号范围内缩小，仍放不下时才显示省略号。
+        // 战斗技能名因此不会换出第二行，也不会为了显示全名缩成难以辨认的小字。
+        invoke_int_setter(g_tmp_set_overflow_mode_info, instance,
+                          rect.valid ? 1 : 0);  // 有有效宽度时 Ellipsis，否则 Overflow。
+        float scale = visible_length <= 8 ? 1.0f :
+                (visible_length <= 20 ? 0.96f : 0.90f);
+        // 左侧编队槽原始字号为 30，在手机上辨识度不足；该控件高度由遮罩动态提供，
+        // 因此固定为用户指定的 35，避免自动字号再次把长编队名缩小。
+        float maximum = formation_deck_label ? 35.0f : state.font_size * scale;
+        float minimum = formation_deck_label ? 35.0f :
+                std::min(maximum, std::max(9.0f, state.font_size * 0.55f));
         invoke_float_setter(g_tmp_set_font_size_min_info, instance, minimum);
         invoke_float_setter(g_tmp_set_font_size_max_info, instance, maximum);
         invoke_float_setter(g_tmp_set_font_size_info, instance, maximum);
         invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, true);
+        if (state.has_line_spacing) {
+            invoke_float_setter(g_tmp_set_line_spacing_info, instance, state.line_spacing);
+        }
+    } else if (short_text) {
+        // 汉化包明确保留换行时，使用原字号并扩大上下行距离；不再通过缩小字号
+        // 掩盖重叠。关闭自动换行后只尊重文本已有的换行符，避免额外拆出第三行。
+        invoke_bool_setter(g_tmp_set_word_wrapping_info, instance, false);
+        invoke_int_setter(g_tmp_set_overflow_mode_info, instance, 0);  // Overflow.
+        invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, false);
+        invoke_float_setter(g_tmp_set_font_size_info, instance, state.font_size);
+        // 人格卡名由富文本 line-height 控制，此处归零额外行距，避免两套机制叠加；
+        // 其他多行控件仍使用较温和的 24% 间距。
+        float safe_spacing = personality_group_name ? 0.0f :
+                std::max(state.font_size * 0.24f,
+                         state.has_line_spacing ? state.line_spacing : 0.0f);
+        invoke_float_setter(g_tmp_set_line_spacing_info, instance, safe_spacing);
     } else {
-        // 长正文不强制“缩到一屏”，否则说明文字会小到不可读；仅略微收窄字号并保留
-        // 页面原有的自动缩放边界与滚动行为。
+        // 长说明恢复页面原有换行与溢出策略，字号不再统一缩小 8%；正文优先保持可读。
+        if (state.has_word_wrapping) {
+            invoke_bool_setter(g_tmp_set_word_wrapping_info, instance, state.word_wrapping);
+        }
+        if (state.has_overflow_mode) {
+            invoke_int_setter(g_tmp_set_overflow_mode_info, instance, state.overflow_mode);
+        }
+        if (state.has_line_spacing) {
+            invoke_float_setter(g_tmp_set_line_spacing_info, instance, state.line_spacing);
+        }
         if (state.has_auto_sizing) {
             invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, state.auto_sizing);
         }
@@ -953,8 +1367,55 @@ void apply_translated_tmp_style(void *instance, void *managed_text,
         if (state.has_font_size_max) {
             invoke_float_setter(g_tmp_set_font_size_max_info, instance, state.font_size_max);
         }
-        invoke_float_setter(g_tmp_set_font_size_info, instance, state.font_size * 0.92f);
+        invoke_float_setter(g_tmp_set_font_size_info, instance, state.font_size * 0.98f);
     }
+
+    uint64_t decisions = g_layout_decisions.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (decisions <= 20 || decisions % 500 == 0) {
+        // 诊断只记录几何和分类，不输出正文内容；用户回传日志即可判断控件为何选了单/双行。
+        LT_LOGI("TMP layout decision=%llu chars=%zu rect=%.1fx%.1f font=%.1f single=%d short=%d",
+                static_cast<unsigned long long>(decisions), visible_length,
+                rect.width, rect.height, state.font_size, single_line, short_text);
+    }
+}
+
+void *apply_tmp_component_layout_markup(void *instance, void *managed_text) {
+    if (instance == nullptr || managed_text == nullptr ||
+        g_string_length == nullptr || g_string_chars == nullptr) {
+        return managed_text;
+    }
+    int32_t length = g_string_length(managed_text);
+    std::string text;
+    if (length < 0 || length > 4096 ||
+        !utf16_to_utf8(g_string_chars(managed_text), length, &text) ||
+        text.find("<line-height=") != std::string::npos) {
+        return managed_text;
+    }
+    std::string component_name = read_unity_object_name(instance);
+    if (component_name != "[Text]GroupName") {
+        return managed_text;
+    }
+    // 某些页面会把包内换行压成空格或直接去掉。通过当前汉化包自动生成的兼容索引
+    // 恢复原始分行，确保任意人格标题都遵循包内排版，而不是只修复已知个例。
+    auto package_layout = g_package_line_breaks.find(text);
+    if (package_layout != g_package_line_breaks.end()) {
+        text = package_layout->second;
+    }
+    if (text.find('\n') == std::string::npos) {
+        return managed_text;
+    }
+    // 人格名称控件会忽略运行时 lineSpacing，却会在生成网格时遵守 TMP 富文本行高。
+    // 只移动空格处的换行，不增删或改写汉化包正文，并统一使用用户指定的 150% 行高。
+    size_t line_count = 0;
+    std::string reflowed = reflow_personality_title(text, &line_count);
+    // 用户要求所有人格卡底栏保持一致，二行与三行标题统一采用 150% 行高。
+    std::string formatted = apply_uniform_line_height(reflowed, 150);
+    void *replacement = new_managed_string(formatted);
+    if (replacement == nullptr) return managed_text;
+    pthread_mutex_lock(&g_font_state_lock);
+    g_translated_managed_texts.insert(formatted);
+    pthread_mutex_unlock(&g_font_state_lock);
+    return replacement;
 }
 
 void *prepare_tmp_text(void *instance, void *managed_text) {
@@ -978,13 +1439,13 @@ void *prepare_tmp_text(void *instance, void *managed_text) {
             if (replacement != managed_text && !ensure_tmp_font()) {
                 return managed_text;
             }
+            replacement = apply_tmp_component_layout_markup(instance, replacement);
             bool translated = is_translated_managed_string(replacement);
             if (translated && ensure_tmp_font() && g_tmp_get_font != nullptr &&
                 g_tmp_set_font != nullptr) {
                 void *current_font = g_tmp_get_font(instance, g_tmp_get_font_info);
-                TmpComponentState state;
                 if (current_font != g_tmp_font_asset) {
-                    state = capture_tmp_component_state(instance, current_font);
+                    capture_tmp_component_state(instance, current_font);
                     g_tmp_set_font(instance, g_tmp_font_asset, g_tmp_set_font_info);
                     // TMP 组件可能保留旧字体的共享材质；字体图集与材质不匹配时会把
                     // 正确字形采样成碎片或白块，因此在字体切换后显式绑定中文字体材质。
@@ -1001,10 +1462,7 @@ void *prepare_tmp_text(void *instance, void *managed_text) {
                         LT_LOGI("TMP Chinese primary font switches=%llu font=%p",
                                 static_cast<unsigned long long>(switches), g_tmp_font_asset);
                     }
-                } else {
-                    find_tmp_component_state(instance, &state);
                 }
-                apply_translated_tmp_style(instance, replacement, state);
             } else if (!translated) {
                 restore_tmp_component_state(instance);
             }
@@ -1019,22 +1477,150 @@ void *prepare_tmp_text(void *instance, void *managed_text) {
     return replacement;
 }
 
+void finalize_tmp_text(void *instance, void *managed_text) {
+    if (instance == nullptr || managed_text == nullptr ||
+        !is_translated_managed_string(managed_text)) {
+        return;
+    }
+    TmpComponentState state;
+    if (find_tmp_component_state(instance, &state)) {
+        // 必须在原始 set_text/SetText 完成后再应用字号和换行；否则游戏 setter 会用
+        // 旧文本重新计算布局，导致我们设置的自动缩放没有真正处理新中文。
+        apply_translated_tmp_style(instance, managed_text, state);
+    }
+}
+
+void apply_translated_ui_style(void *instance, void *managed_text,
+                               const UiComponentState &state) {
+    if (managed_text == nullptr || !state.has_font_size || state.font_size <= 0 ||
+        g_string_length == nullptr || g_string_chars == nullptr) {
+        return;
+    }
+    int32_t length = g_string_length(managed_text);
+    std::string text;
+    if (length < 0 || length > 1024 * 1024 ||
+        !utf16_to_utf8(g_string_chars(managed_text), length, &text)) {
+        return;
+    }
+    size_t visible_length = count_visible_codepoints(text);
+    bool has_explicit_break = text.find('\n') != std::string::npos ||
+            text.find('\r') != std::string::npos;
+    bool short_text = visible_length <= 48;
+    ComponentRect rect = read_component_rect(instance, g_ui_get_rect_transform_info);
+    bool single_line = short_text && !has_explicit_break;
+
+    if (single_line) {
+        // 旧 UI.Text 没有 TMP 的单行自动缩放。根据矩形宽度直接计算安全字号，
+        // 然后关闭换行和裁切，保证横幅与页签不会只剩零碎笔画。
+        float scale = 1.0f;
+        if (rect.valid && visible_length > 0) {
+            float estimated_width = static_cast<float>(visible_length * state.font_size);
+            scale = std::min(1.0f, rect.width / std::max(1.0f, estimated_width));
+        }
+        int32_t safe_size = std::max(7, static_cast<int32_t>(
+                static_cast<float>(state.font_size) * scale * 0.96f));
+        invoke_bool_setter(g_ui_set_resize_best_fit_info, instance, false);
+        invoke_int_setter(g_ui_set_font_size_info, instance, safe_size);
+        invoke_int_setter(g_ui_set_horizontal_overflow_info, instance, 1);  // Overflow.
+        invoke_int_setter(g_ui_set_vertical_overflow_info, instance, 1);    // Overflow.
+        if (state.has_line_spacing) {
+            invoke_float_setter(g_ui_set_line_spacing_info, instance,
+                                std::max(1.0f, state.line_spacing));
+        }
+    } else if (short_text) {
+        // 汉化包明确含换行时保留原字号，并用 Unity UI 的行高倍率拉开上下距离。
+        invoke_bool_setter(g_ui_set_resize_best_fit_info, instance, false);
+        invoke_int_setter(g_ui_set_font_size_info, instance, state.font_size);
+        invoke_int_setter(g_ui_set_horizontal_overflow_info, instance, 0);  // Wrap.
+        invoke_int_setter(g_ui_set_vertical_overflow_info, instance, 1);    // Overflow.
+        invoke_float_setter(g_ui_set_line_spacing_info, instance,
+                            state.has_line_spacing ? std::max(1.24f, state.line_spacing) : 1.24f);
+    } else {
+        // 正文保留游戏原排版，避免为了塞进一屏而缩成难以阅读的小字。
+        if (state.has_resize_best_fit) {
+            invoke_bool_setter(
+                    g_ui_set_resize_best_fit_info, instance, state.resize_best_fit);
+        }
+        if (state.has_resize_min_size) {
+            invoke_int_setter(
+                    g_ui_set_resize_min_size_info, instance, state.resize_min_size);
+        }
+        if (state.has_resize_max_size) {
+            invoke_int_setter(
+                    g_ui_set_resize_max_size_info, instance, state.resize_max_size);
+        }
+        if (state.has_horizontal_overflow) {
+            invoke_int_setter(g_ui_set_horizontal_overflow_info, instance,
+                              state.horizontal_overflow);
+        }
+        if (state.has_vertical_overflow) {
+            invoke_int_setter(
+                    g_ui_set_vertical_overflow_info, instance, state.vertical_overflow);
+        }
+        if (state.has_line_spacing) {
+            invoke_float_setter(g_ui_set_line_spacing_info, instance, state.line_spacing);
+        }
+        invoke_int_setter(g_ui_set_font_size_info, instance, state.font_size);
+    }
+}
+
+void *prepare_ui_text(void *instance, void *managed_text) {
+    void *replacement = translate_managed_string(managed_text);
+    bool translated = replacement != nullptr && is_translated_managed_string(replacement);
+    if (!translated) {
+        restore_ui_component_state(instance);
+        return replacement;
+    }
+    ensure_tmp_font();
+    if (instance == nullptr || g_ui_font == nullptr) return replacement;
+    void *current_font = invoke_object_getter(g_ui_get_font_info, instance);
+    if (current_font != g_ui_font) {
+        capture_ui_component_state(instance);
+        invoke_object_setter(g_ui_set_font_info, instance, g_ui_font);
+        uint64_t switches = g_ui_primary_font_switches.fetch_add(
+                1, std::memory_order_relaxed) + 1;
+        if (switches == 1 || switches % 500 == 0) {
+            LT_LOGI("UI.Text Chinese primary font switches=%llu font=%p",
+                    static_cast<unsigned long long>(switches), g_ui_font);
+        }
+    }
+    return replacement;
+}
+
+void finalize_ui_text(void *instance, void *managed_text) {
+    if (instance == nullptr || managed_text == nullptr ||
+        !is_translated_managed_string(managed_text)) {
+        return;
+    }
+    UiComponentState state;
+    if (find_ui_component_state(instance, &state)) {
+        apply_translated_ui_style(instance, managed_text, state);
+    }
+}
+
 void replacement_tmp_set_text(void *instance, void *managed_text, const void *method) {
-    g_original_tmp_set_text(instance, prepare_tmp_text(instance, managed_text), method);
+    void *replacement = prepare_tmp_text(instance, managed_text);
+    g_original_tmp_set_text(instance, replacement, method);
+    finalize_tmp_text(instance, replacement);
 }
 
 void replacement_tmp_set_text_one(void *instance, void *managed_text, const void *method) {
-    g_original_tmp_set_text_one(instance, prepare_tmp_text(instance, managed_text), method);
+    void *replacement = prepare_tmp_text(instance, managed_text);
+    g_original_tmp_set_text_one(instance, replacement, method);
+    finalize_tmp_text(instance, replacement);
 }
 
 void replacement_ui_set_text(void *instance, void *managed_text, const void *method) {
-    g_original_ui_set_text(instance, translate_managed_string(managed_text), method);
+    void *replacement = prepare_ui_text(instance, managed_text);
+    g_original_ui_set_text(instance, replacement, method);
+    finalize_ui_text(instance, replacement);
 }
 
 void replacement_tmp_set_text_string(void *instance, void *managed_text, bool sync_input,
                                      const void *method) {
-    g_original_tmp_set_text_string(
-            instance, prepare_tmp_text(instance, managed_text), sync_input, method);
+    void *replacement = prepare_tmp_text(instance, managed_text);
+    g_original_tmp_set_text_string(instance, replacement, sync_input, method);
+    finalize_tmp_text(instance, replacement);
 }
 
 int32_t replacement_get_language(void *instance, const void *method) {
@@ -1071,6 +1657,34 @@ bool read_string(FILE *file, std::string *value) {
     if (!read_u32(file, &size) || size > kMaxStringBytes) return false;
     value->resize(size);
     return read_exact(file, size == 0 ? nullptr : &(*value)[0], size);
+}
+
+void rebuild_package_line_break_index(
+        const std::unordered_map<std::string, std::string> &translations) {
+    g_package_line_breaks.clear();
+    std::unordered_set<std::string> ambiguous;
+    const auto register_variant = [&ambiguous](const std::string &variant,
+                                               const std::string &translation) {
+        if (variant == translation || ambiguous.find(variant) != ambiguous.end()) return;
+        auto existing = g_package_line_breaks.find(variant);
+        if (existing == g_package_line_breaks.end()) {
+            g_package_line_breaks.emplace(variant, translation);
+        } else if (existing->second != translation) {
+            // 展平形式有歧义时宁可保留游戏文本，也不能恢复成另一个人格的换行结构。
+            g_package_line_breaks.erase(existing);
+            ambiguous.insert(variant);
+        }
+    };
+    for (const auto &entry : translations) {
+        const std::string &translation = entry.second;
+        if (translation.find('\n') == std::string::npos) continue;
+        std::string spaced = translation;
+        std::replace(spaced.begin(), spaced.end(), '\n', ' ');
+        register_variant(spaced, translation);
+        std::string compact = translation;
+        compact.erase(std::remove(compact.begin(), compact.end(), '\n'), compact.end());
+        register_variant(compact, translation);
+    }
 }
 
 bool load_index_file(const char *path) {
@@ -1120,9 +1734,10 @@ bool load_index_file(const char *path) {
     }
     g_index.swap(loaded);
     g_terms.swap(loaded_terms);
+    rebuild_package_line_break_index(g_index);
     rebuild_term_trie();
-    LT_LOGI("Loaded Japanese full-text translation index entries=%zu terms=%zu path=%s",
-            g_index.size(), g_terms.size(), path);
+    LT_LOGI("Loaded Japanese full-text translation index entries=%zu terms=%zu lineBreaks=%zu path=%s",
+            g_index.size(), g_terms.size(), g_package_line_breaks.size(), path);
     return true;
 }
 
@@ -1356,6 +1971,10 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
     void *ui_text_class = nullptr;
     void *tmp_font_class = nullptr;
     void *unity_font_class = nullptr;
+    void *unity_object_class = nullptr;
+    void *component_class = nullptr;
+    void *transform_class = nullptr;
+    void *rect_transform_class = nullptr;
     void *material_class = nullptr;
     void *tmp_settings_class = nullptr;
     const void *get_language_method = nullptr;
@@ -1400,6 +2019,18 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
         }
         if (unity_font_class == nullptr) {
             unity_font_class = class_from_name(image, "UnityEngine", "Font");
+        }
+        if (unity_object_class == nullptr) {
+            unity_object_class = class_from_name(image, "UnityEngine", "Object");
+        }
+        if (component_class == nullptr) {
+            component_class = class_from_name(image, "UnityEngine", "Component");
+        }
+        if (transform_class == nullptr) {
+            transform_class = class_from_name(image, "UnityEngine", "Transform");
+        }
+        if (rect_transform_class == nullptr) {
+            rect_transform_class = class_from_name(image, "UnityEngine", "RectTransform");
         }
         if (material_class == nullptr) {
             material_class = class_from_name(image, "UnityEngine", "Material");
@@ -1517,6 +2148,8 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
     };
     const void *tmp_get_font_material_method = tmp_text_class == nullptr ? nullptr :
             class_get_method_from_name(tmp_text_class, "get_fontMaterial", 0);
+    const void *tmp_set_font_material_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "set_fontMaterial", 1);
     const void *tmp_font_get_material_method = tmp_font_class == nullptr ? nullptr :
             class_get_method_from_name(tmp_font_class, "get_material", 0);
     const void *tmp_get_shared_material_method = tmp_text_class == nullptr ? nullptr :
@@ -1543,6 +2176,58 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
             class_get_method_from_name(tmp_text_class, "get_enableAutoSizing", 0);
     const void *tmp_set_auto_sizing_method = tmp_text_class == nullptr ? nullptr :
             class_get_method_from_name(tmp_text_class, "set_enableAutoSizing", 1);
+    const void *tmp_get_word_wrapping_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "get_enableWordWrapping", 0);
+    const void *tmp_set_word_wrapping_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "set_enableWordWrapping", 1);
+    const void *tmp_get_overflow_mode_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "get_overflowMode", 0);
+    const void *tmp_set_overflow_mode_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "set_overflowMode", 1);
+    const void *tmp_get_rect_transform_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "get_rectTransform", 0);
+    const void *ui_get_font_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "get_font", 0);
+    const void *ui_set_font_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "set_font", 1);
+    const void *ui_get_line_spacing_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "get_lineSpacing", 0);
+    const void *ui_set_line_spacing_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "set_lineSpacing", 1);
+    const void *ui_get_font_size_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "get_fontSize", 0);
+    const void *ui_set_font_size_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "set_fontSize", 1);
+    const void *ui_get_resize_min_size_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "get_resizeTextMinSize", 0);
+    const void *ui_set_resize_min_size_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "set_resizeTextMinSize", 1);
+    const void *ui_get_resize_max_size_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "get_resizeTextMaxSize", 0);
+    const void *ui_set_resize_max_size_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "set_resizeTextMaxSize", 1);
+    const void *ui_get_resize_best_fit_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "get_resizeTextForBestFit", 0);
+    const void *ui_set_resize_best_fit_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "set_resizeTextForBestFit", 1);
+    const void *ui_get_horizontal_overflow_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "get_horizontalOverflow", 0);
+    const void *ui_set_horizontal_overflow_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "set_horizontalOverflow", 1);
+    const void *ui_get_vertical_overflow_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "get_verticalOverflow", 0);
+    const void *ui_set_vertical_overflow_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "set_verticalOverflow", 1);
+    const void *ui_get_rect_transform_method = ui_text_class == nullptr ? nullptr :
+            class_get_method_from_name(ui_text_class, "get_rectTransform", 0);
+    const void *rect_transform_get_rect_method = rect_transform_class == nullptr ? nullptr :
+            class_get_method_from_name(rect_transform_class, "get_rect", 0);
+    const void *object_get_name_method = unity_object_class == nullptr ? nullptr :
+            class_get_method_from_name(unity_object_class, "get_name", 0);
+    const void *component_get_transform_method = component_class == nullptr ? nullptr :
+            class_get_method_from_name(component_class, "get_transform", 0);
+    const void *transform_get_parent_method = transform_class == nullptr ? nullptr :
+            class_get_method_from_name(transform_class, "get_parent", 0);
     const void *material_get_float_method = find_method_by_signature(
             material_class, "GetFloat", "System.String");
     const void *material_set_float_method = find_method_by_signature(
@@ -1554,17 +2239,36 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
     const void *get_fallback_fonts_method = tmp_settings_class == nullptr ? nullptr :
             class_get_method_from_name(tmp_settings_class, "get_fallbackFontAssets", 0);
     LT_LOGI("TMP fallback getter class=%p method=%p", tmp_settings_class, get_fallback_fonts_method);
-    LT_LOGI("TMP style methods material=%p fontAssetMaterial=%p fontMaterial=%p shared=%p/%p spacing=%p/%p"
-            " fontSize=%p/%p min=%p/%p max=%p/%p auto=%p/%p outline=%p/%p/%p/%p",
-            material_class, tmp_font_get_material_method, tmp_get_font_material_method,
+    LT_LOGI("TMP style methods material=%p fontAssetMaterial=%p fontMaterial=%p/%p shared=%p/%p spacing=%p/%p"
+            " fontSize=%p/%p min=%p/%p max=%p/%p auto=%p/%p wrap=%p/%p overflow=%p/%p"
+            " rect=%p/%p outline=%p/%p/%p/%p",
+            material_class, tmp_font_get_material_method,
+            tmp_get_font_material_method, tmp_set_font_material_method,
             tmp_get_shared_material_method,
             tmp_set_shared_material_method, tmp_get_line_spacing_method,
             tmp_set_line_spacing_method, tmp_get_font_size_method, tmp_set_font_size_method,
             tmp_get_font_size_min_method, tmp_set_font_size_min_method,
             tmp_get_font_size_max_method, tmp_set_font_size_max_method,
             tmp_get_auto_sizing_method, tmp_set_auto_sizing_method,
+            tmp_get_word_wrapping_method, tmp_set_word_wrapping_method,
+            tmp_get_overflow_mode_method, tmp_set_overflow_mode_method,
+            tmp_get_rect_transform_method, rect_transform_get_rect_method,
             material_get_float_method, material_set_float_method,
             material_get_color_method, material_set_color_method);
+    LT_LOGI("UI.Text style methods font=%p/%p spacing=%p/%p fontSize=%p/%p min=%p/%p"
+            " max=%p/%p bestFit=%p/%p horizontal=%p/%p vertical=%p/%p rect=%p/%p",
+            ui_get_font_method, ui_set_font_method,
+            ui_get_line_spacing_method, ui_set_line_spacing_method,
+            ui_get_font_size_method, ui_set_font_size_method,
+            ui_get_resize_min_size_method, ui_set_resize_min_size_method,
+            ui_get_resize_max_size_method, ui_set_resize_max_size_method,
+            ui_get_resize_best_fit_method, ui_set_resize_best_fit_method,
+            ui_get_horizontal_overflow_method, ui_set_horizontal_overflow_method,
+            ui_get_vertical_overflow_method, ui_set_vertical_overflow_method,
+            ui_get_rect_transform_method, rect_transform_get_rect_method);
+    LT_LOGI("Unity hierarchy methods name=%p transform=%p parent=%p",
+            object_get_name_method, component_get_transform_method,
+            transform_get_parent_method);
     if (tmp_font_class != nullptr && create_tmp_font_method == nullptr) {
         create_tmp_font_method = class_get_method_from_name(tmp_font_class, "CreateFontAsset", 9);
     }
@@ -1631,6 +2335,32 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
         g_tmp_set_font_size_max_info = tmp_set_font_size_max_method;
         g_tmp_get_auto_sizing_info = tmp_get_auto_sizing_method;
         g_tmp_set_auto_sizing_info = tmp_set_auto_sizing_method;
+        g_tmp_get_word_wrapping_info = tmp_get_word_wrapping_method;
+        g_tmp_set_word_wrapping_info = tmp_set_word_wrapping_method;
+        g_tmp_get_overflow_mode_info = tmp_get_overflow_mode_method;
+        g_tmp_set_overflow_mode_info = tmp_set_overflow_mode_method;
+        g_tmp_get_rect_transform_info = tmp_get_rect_transform_method;
+        g_ui_get_font_info = ui_get_font_method;
+        g_ui_set_font_info = ui_set_font_method;
+        g_ui_get_line_spacing_info = ui_get_line_spacing_method;
+        g_ui_set_line_spacing_info = ui_set_line_spacing_method;
+        g_ui_get_font_size_info = ui_get_font_size_method;
+        g_ui_set_font_size_info = ui_set_font_size_method;
+        g_ui_get_resize_min_size_info = ui_get_resize_min_size_method;
+        g_ui_set_resize_min_size_info = ui_set_resize_min_size_method;
+        g_ui_get_resize_max_size_info = ui_get_resize_max_size_method;
+        g_ui_set_resize_max_size_info = ui_set_resize_max_size_method;
+        g_ui_get_resize_best_fit_info = ui_get_resize_best_fit_method;
+        g_ui_set_resize_best_fit_info = ui_set_resize_best_fit_method;
+        g_ui_get_horizontal_overflow_info = ui_get_horizontal_overflow_method;
+        g_ui_set_horizontal_overflow_info = ui_set_horizontal_overflow_method;
+        g_ui_get_vertical_overflow_info = ui_get_vertical_overflow_method;
+        g_ui_set_vertical_overflow_info = ui_set_vertical_overflow_method;
+        g_ui_get_rect_transform_info = ui_get_rect_transform_method;
+        g_rect_transform_get_rect_info = rect_transform_get_rect_method;
+        g_object_get_name_info = object_get_name_method;
+        g_component_get_transform_info = component_get_transform_method;
+        g_transform_get_parent_info = transform_get_parent_method;
         g_material_get_float_info = material_get_float_method;
         g_material_set_float_info = material_set_float_method;
         g_material_get_color_info = material_get_color_method;
@@ -1656,6 +2386,40 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
             return position != pointers.end() && *position == address &&
                     (position + 1 == pointers.end() || *(position + 1) - address >= 16);
         };
+        void *set_shared_material_pointer = nullptr;
+        if (tmp_set_shared_material_method != nullptr) {
+            memcpy(&set_shared_material_pointer, tmp_set_shared_material_method,
+                   sizeof(set_shared_material_pointer));
+        }
+        if (set_shared_material_pointer != nullptr &&
+            has_inline_hook_space(tmp_text_class, set_shared_material_pointer)) {
+            MSHookFunction(set_shared_material_pointer,
+                           reinterpret_cast<void *>(replacement_tmp_set_shared_material),
+                           reinterpret_cast<void **>(&g_original_tmp_set_shared_material));
+        } else if (set_shared_material_pointer != nullptr) {
+            LT_LOGW("Skip unsafe adjacent TMP shared material setter=%p",
+                    set_shared_material_pointer);
+        }
+        void *set_material_pointer = nullptr;
+        if (tmp_set_font_material_method != nullptr) {
+            memcpy(&set_material_pointer, tmp_set_font_material_method,
+                   sizeof(set_material_pointer));
+        }
+        if (set_material_pointer != nullptr &&
+            set_material_pointer != set_shared_material_pointer &&
+            has_inline_hook_space(tmp_text_class, set_material_pointer)) {
+            MSHookFunction(set_material_pointer,
+                           reinterpret_cast<void *>(replacement_tmp_set_material),
+                           reinterpret_cast<void **>(&g_original_tmp_set_material));
+        } else if (set_material_pointer != nullptr &&
+                   set_material_pointer != set_shared_material_pointer) {
+            LT_LOGW("Skip unsafe adjacent TMP material setter=%p", set_material_pointer);
+        }
+        LT_LOGI("TMP material hooks shared=%p/%p instance=%p/%p",
+                set_shared_material_pointer,
+                reinterpret_cast<void *>(g_original_tmp_set_shared_material),
+                set_material_pointer,
+                reinterpret_cast<void *>(g_original_tmp_set_material));
         if (ui_pointer != nullptr && has_inline_hook_space(ui_text_class, ui_pointer)) {
             MSHookFunction(ui_pointer, reinterpret_cast<void *>(replacement_ui_set_text),
                            reinterpret_cast<void **>(&g_original_ui_set_text));
@@ -1905,6 +2669,7 @@ void configure_limbus_translation_runtime(const char *active_index_pointer) {
     g_il2cpp_path[0] = 0;
     g_index.clear();
     g_terms.clear();
+    g_package_line_breaks.clear();
     g_term_trie.clear();
     load_active_index();
     pthread_mutex_unlock(&g_lock);

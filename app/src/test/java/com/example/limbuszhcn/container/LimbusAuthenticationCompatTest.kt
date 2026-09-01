@@ -26,6 +26,15 @@ class LimbusAuthenticationCompatTest {
             "example.other", ""))
     }
 
+    /** 验证 Android 12 起 Provider 必须使用 Binder 可验证的宿主物理身份。 */
+    @Test
+    fun usesPhysicalProviderIdentityFromAndroid12() {
+        assertFalse(LimbusAuthenticationCompat.shouldUsePhysicalProviderIdentity(30))
+        assertTrue(LimbusAuthenticationCompat.shouldUsePhysicalProviderIdentity(31))
+        assertTrue(LimbusAuthenticationCompat.shouldUsePhysicalProviderIdentity(33))
+        assertTrue(LimbusAuthenticationCompat.shouldUsePhysicalProviderIdentity(36))
+    }
+
     /** 验证只接受游戏 manifest 声明的两个 Firebase Auth 回调 URI。 */
     @Test
     fun resolvesOnlyExactFirebaseAuthRedirects() {

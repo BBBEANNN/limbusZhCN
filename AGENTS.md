@@ -31,6 +31,7 @@
 - Limbus 通用 PackageManager 查询默认隔离宿主环境; 宿主 Google 包只允许按白名单精确暴露。
 - PlayCore asset pack 必须通过注入 `local_testing_dir` 走 `FakeAssetPackService`, 不得绑定宿主 Play Store `AssetModuleService`。
 - GMS broker 请求必须通过 `ServiceConnectionDelegate` 改写残留调用包名, 避免 `Unknown calling package name 'com.ProjectMoon.LimbusCompany'`。该改写同时适用于宿主 GMS 和容器内安装的 microG,不得因 `com.google.android.gms` 已虚拟安装而跳过。
+- Android 12 及以上的跨进程 `ContentProvider` 调用必须让 `AttributionSource` 使用宿主物理 UID 与宿主包名,并让本地 Provider 接口使用同一物理 Binder 身份。虚拟 UID 只用于容器内部路由,不得传到会校验内核调用 UID 的系统边界。
 - Limbus Credentials `HiddenActivity` extras 含 GMS Parcelable 和 Binder, 不得经过 VAMS server 解包。必须在游戏进程内包装为当前 vpid 的 host stub Intent 并调用系统 `ActivityTaskManager`; 目标 Activity 仍由 `AppInstrumentation` 使用游戏 classloader 创建。该瞬态 Activity 没有 VAMS `ActivityRecord`, create/resume/finish/destroy 不得登记到 VAMS 任务栈, 但系统 token 和 Activity result 链路必须保留。
 - 容器内 microG Services/FakeStore 与 Limbus 一样不得进入旧式 ART `jmethodID` 内存改写 VM hook；它们所需的 IO 重定向、Binder 身份和 Activity result 兼容均由独立层完成。Firebase Apple/验证码浏览器回调只允许由宿主精确接管 `genericidp://firebase.auth/` 与 `recaptcha://firebase.auth/`,再显式转发到容器内 Limbus 对应 Activity；不得把其它 URI 或浏览器 extras 带入容器。
 - Limbus 原生 DNS 与 socket 连接必须绕过 VirtualApp 域名/IP 策略。允许有限日志诊断, 不得修改测试机 VPN、代理或路由。
@@ -57,6 +58,7 @@
 - 最近新增 Firebase C++ Auth shim 后, 容器已从黑屏推进到 `PlayVideo -> PlayWarningAnim -> PlayDone` 并显示标题页。
 - Google 登录选择器可打开; 选择账号后仍需继续跟踪 Credentials result 回调和 Unity 登录状态。
 - vivo/Android 13 的 Issue #1 已确认 Google 登录会启动 `:p1/:p2` microG 辅助进程,随后在 `libv++_64.so -> hookAndroidVM -> NativeEngine.launchEngine` 同步崩溃；Apple 登录同时缺失浏览器 `genericidp` 回调入口。修复后仍须在真机确认账号选择结果和 Apple OAuth 状态确实返回 p0 游戏进程。
+- Redmi 25102RKBEC / Android 16 的 Issue #4 已确认 Google 登录会在 `GoogleApiHandler` 调用 GMS `ContentProvider.call()` 时因 `Calling uid: 10334 doesn't match source uid: 10001` 崩溃。根因是 `VAContentProviderProxy` 把虚拟 UID 写进了跨进程 `AttributionSource`;修复包仍须在原设备确认异常消失并且登录结果能返回游戏进程。
 - 游戏文本文件在进入主页面登录后才下载, 不要在标题页阶段期待 `Localize/en/` 已完整存在。
 - Redmi/Android 12 + Limbus v1.109.1 已验证同步到容器 versionCode 450 后可再次走完
   `PlayVideo -> PlayWarningAnim -> PlayDone`,并恢复 `SetLoginInfo : GOOGLE`。若 APK

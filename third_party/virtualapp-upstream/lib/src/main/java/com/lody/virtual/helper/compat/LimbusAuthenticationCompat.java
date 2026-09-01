@@ -20,6 +20,7 @@ public final class LimbusAuthenticationCompat {
             "com.google.firebase.auth.internal.GenericIdpActivity";
     private static final String RECAPTCHA_ACTIVITY =
             "com.google.firebase.auth.internal.RecaptchaActivity";
+    private static final int ANDROID_12_API_LEVEL = 31;
 
     private LimbusAuthenticationCompat() {
     }
@@ -45,6 +46,20 @@ public final class LimbusAuthenticationCompat {
                 ? ""
                 : nativeBridge.toLowerCase(Locale.ENGLISH);
         return normalizedBridge.contains("houdini") || normalizedBridge.contains("nb");
+    }
+
+    /**
+     * 判断 ContentProvider 调用是否必须使用宿主的物理 Binder 身份。
+     *
+     * <p>Android 12 起 {@code AttributionSource} 会强制核对 Binder 实际调用 UID。
+     * VirtualApp 的虚拟 UID 不存在于内核 Binder 边界，因此只能用于容器内部路由，
+     * 不能继续写入跨进程 Provider 请求。</p>
+     *
+     * @param apiLevel 当前 Android API 级别
+     * @return Android 12（API 31）及以上返回 {@code true}
+     */
+    public static boolean shouldUsePhysicalProviderIdentity(int apiLevel) {
+        return apiLevel >= ANDROID_12_API_LEVEL;
     }
 
     /**

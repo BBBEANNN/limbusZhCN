@@ -180,6 +180,21 @@ AppSealing 后台 `Thread-5` 会稳定在 `libcovault-appsec.so +0x248d4` 以空
 默认 SIGSEGV（会杀死整个游戏），也不能返回重试（会死循环）；运行时必须同时核对基址、
 偏移、故障地址、寄存器、指令和非主线程身份后，仅以原始 `exit` 隔离当前后台线程。
 
+## Issue #4 Android 16 Google 登录 Provider 身份崩溃
+
+2026-08-31 的 Redmi 25102RKBEC / Android 16（API 36）诊断包记录了四次相同的
+`GoogleApiHandler` Java 崩溃。GMS `ContentProviderClient.call()` 经
+`VAContentProviderProxy` 转发后，系统抛出
+`SecurityException: Calling uid: 10334 doesn't match source uid: 10001`。其中 10334 是
+内核 Binder 边界可见的汉化器宿主 UID，10001 是 VirtualApp 只应在容器内部使用的虚拟
+UID；该异常发生在账号选择页面显示前后，会中断 GMS 客户端连接并使登录无法继续。
+
+Android 12 起，系统会强制校验 `AttributionSource.uid` 是否与实际 Binder 调用 UID 一致。
+远程 Binder 调用不可能把宿主进程伪装成虚拟 UID，因此跨进程 Provider 请求必须使用宿主
+物理 UID 和宿主包名。本地 Provider 接口也应恢复为同一物理 Binder 身份，避免本地与远程
+两条调用路径产生不同语义；Android 11 及以下继续保留原有虚拟身份行为。该修复不改变
+VirtualApp 内部的包解析、Provider 获取和虚拟 UID 路由。
+
 ## Android 16 / ColorOS 16 兼容结论
 
 2026-08-08 在 PHY110、Android 16（API 36）和 Limbus v1.109.1 上完成真机验证。启动已

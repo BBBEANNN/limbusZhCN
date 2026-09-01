@@ -51,6 +51,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Use the host physical UID and package for Android 12+ `ContentProvider` attribution at the Binder boundary, preventing GMS `GoogleApiHandler` crashes caused by a virtual UID that the system cannot verify.
 - Replace the bundled Sarasa Gothic SC Bold face with the official Regular face so translated game text uses a lighter weight.
 - Share the Android display-field policy between index collection and the controlled term-field subset, and align the native object-field traversal with the same verified display fields.
 - Make GitHub Releases the only translation update source and keep only the public Releases URL in advanced settings.

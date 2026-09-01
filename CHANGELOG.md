@@ -94,6 +94,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Isolate the exact Limbus v462 AppSealing invalid callback from `base+0xd18e0` to `0x18` on Redmi K80 / Android 16, preventing the confirmed Issue #3 background-thread fault from terminating the whole game process.
 - Stabilize Chinese TMP rendering by rebinding the matching font material whenever the runtime switches fonts, preventing intermittent broken glyphs and garbled labels.
 - Preserve readable game UI layouts with single-line auto-sizing and ellipsis for short labels, original-size multiline descriptions, and a 35-point formation-list label.
 - Apply a consistent 150% line height to personality-card titles across formation, arrangement, and selection pages.

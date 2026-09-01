@@ -1763,6 +1763,28 @@ static bool limbus_signal_is_mapped(uintptr_t address) {
             reinterpret_cast<long>(&residency),
             0) == 0;
 }
+
+#if defined(__NR_exit)
+[[noreturn]] static void limbus_signal_isolate_current_thread(
+        const char *message,
+        size_t message_length) {
+    /*
+     * 这里不能调用 libc 的 exit：该符号已经被容器 Hook，且进程级退出会把保护库
+     * 后台线程的已确认故障扩大为整个游戏闪退。原始 __NR_exit 只结束当前线程，
+     * 同时避开 AppSealing 下游 handler 中被拦截的 exit_group 路径。
+     */
+    limbus_signal_raw_syscall4(
+            __NR_write,
+            STDERR_FILENO,
+            reinterpret_cast<long>(message),
+            static_cast<long>(message_length),
+            0);
+    __android_log_write(ANDROID_LOG_WARN, "LimbusSIG", message);
+    for (;;) {
+        limbus_signal_raw_syscall4(__NR_exit, 0, 0, 0, 0);
+    }
+}
+#endif
 #endif
 
 // int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact);
@@ -1923,6 +1945,59 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
     size_t diagnostic_length = static_cast<size_t>(cursor - diagnostic);
     syscall(__NR_write, STDERR_FILENO, diagnostic, diagnostic_length);
     __android_log_write(ANDROID_LOG_ERROR, "LimbusSIG", diagnostic);
+
+#if defined(__aarch64__) && defined(__NR_exit) && defined(__NR_gettid) && defined(__NR_getpid)
+    /*
+     * Issue #3 的 Redmi K80 / Android 16 / Limbus v462 日志确认：AppSealing 后台
+     * Thread-7 从 ELF 装载基址 +0xd18e0 返回后，把 x2 中的 0x18 当作回调地址执行。
+     * /proc/maps 显示的文件段偏移为 +0x248e0；g_limbus_appsealing_base 保存的是 ELF
+     * 装载基址，因此这里必须使用 +0xd18e0，不能混用两套偏移。
+     *
+     * 该分支位于下游 handler 之前，因为 AppSealing handler 会进入进程级退出链。
+     * 除精确 LR 和 `PC == si_addr == x2 == 0x18` 外，还核对 Thread-* 非主线程、
+     * 两个栈参数位置及诊断包中的稳定寄存器。这样不会按 Android 版本或任意低地址
+     * SIGSEGV 泛化吞错，其他同步故障仍交给原 handler 或默认终止。
+     */
+    constexpr uintptr_t kIssue3InvalidCallbackReturnOffset = 0xd18e0;
+    constexpr uintptr_t kIssue3InvalidCallbackAddress = 0x18;
+    uintptr_t appsealing_base = g_limbus_appsealing_base;
+    long current_tid = limbus_signal_raw_syscall4(__NR_gettid, 0, 0, 0, 0);
+    long process_id = limbus_signal_raw_syscall4(__NR_getpid, 0, 0, 0, 0);
+    bool issue3_background_thread = thread_name[0] != '\0'
+            && strncmp(thread_name, "Thread-", 7) == 0
+            && current_tid > 0
+            && process_id > 0
+            && current_tid != process_id;
+    bool issue3_stack_arguments_match = sp <= UINTPTR_MAX - 0x558
+            && registers[1] == sp + 0x558
+            && registers[4] == sp + 0xc8;
+    if (context != nullptr
+            && info != nullptr
+            && info->si_code == SEGV_MAPERR
+            && issue3_background_thread
+            && !pc_mapped
+            && lr_mapped
+            && appsealing_base != 0
+            && lr == appsealing_base + kIssue3InvalidCallbackReturnOffset
+            && pc == kIssue3InvalidCallbackAddress
+            && address == pc
+            && registers[2] == pc
+            && issue3_stack_arguments_match
+            && registers[3] == 0
+            && registers[5] == 0
+            && registers[6] == 0x6f
+            && registers[7] == 0x69
+            && registers[8] == 0xb4
+            && registers[12] == 0x80007
+            && registers[14] == 1
+            && registers[15] == 0x13) {
+        static const char isolated_message[] =
+                "Limbus SIGSEGV guard: isolated Issue #3 Android 16 AppSealing callback fault\n";
+        limbus_signal_isolate_current_thread(
+                isolated_message,
+                sizeof(isolated_message) - 1);
+    }
+#endif
 
     if (info != nullptr && info->si_code <= 0) {
         static const char message[] = "Limbus SIGSEGV guard: ignored user-delivered signal\n";

@@ -180,6 +180,15 @@ AppSealing 后台 `Thread-5` 会稳定在 `libcovault-appsec.so +0x248d4` 以空
 默认 SIGSEGV（会杀死整个游戏），也不能返回重试（会死循环）；运行时必须同时核对基址、
 偏移、故障地址、寄存器、指令和非主线程身份后，仅以原始 `exit` 隔离当前后台线程。
 
+Issue #3 的 Redmi K80 / Android 16 / Limbus v462 诊断包确认了同一回调链的另一条精确
+故障路径。AppSealing 先报告 `30010`，其终止信号被容器阻断；随后后台 `Thread-7` 从
+`libcovault-appsec.so` 文件映射 `+0x248e0`（换算为 ELF 装载基址 `+0xd18e0`）跳到
+未映射回调 `0x18`，且 `PC == si_addr == x2`。此时 Unity 已走到 `PlayDone`，历史退出记录
+明确为 `p0 / SIGNALED / status=11`。运行时只在该 LR、低地址回调、`Thread-*` 非主线程、
+栈参数关系和稳定寄存器全部匹配时，用原始 `__NR_exit` 结束当前保护库后台线程。检查必须
+发生在调用下游 AppSealing handler 之前，避免其进程级退出路径扩大故障；其他同步
+`SIGSEGV` 仍完整交给原 handler 或默认终止。
+
 ## Android 16 / ColorOS 16 兼容结论
 
 2026-08-08 在 PHY110、Android 16（API 36）和 Limbus v1.109.1 上完成真机验证。启动已

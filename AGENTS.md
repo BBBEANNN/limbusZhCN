@@ -39,6 +39,10 @@
 
 - Limbus native 终止路径只做容器进程内轻量拦截; `SIGPWR` / `SIGXCPU` 必须放行。
 - `SIGSEGV` 仅可忽略 `si_code <= 0` 的用户主动投递; 同步内存错误必须交回原 handler。若下游 handler 返回后 PC/SP 均未改变,表示它没有消费当前同步故障,必须恢复默认处理并终止,不得返回原指令形成信号/日志死循环。
+- Limbus v462 在 Redmi K80 / Android 16 上已确认 AppSealing 后台 `Thread-*` 会从 ELF
+  `base+0xd18e0` 跳到无效回调 `0x18`。只允许在 LR、未映射 PC/fault address/x2、
+  栈寄存器关系和其余稳定寄存器全部匹配 Issue #3 现场时，以原始 `exit` 隔离当前后台
+  线程；不得按 Android 版本或任意低地址 SIGSEGV 泛化吞错。
 - libc hook 必须保持公开 API 返回值语义。例如 `getcwd()` 成功时返回调用方 buffer 指针, 不能暴露 raw syscall 长度。
 - native 路径伪装必须覆盖 `readlinkat` / `syscall(__NR_readlinkat)` 和 `/proc/self/fd` 反向路径。
 - AppSealing 50040 已确认由 `/proc/self/maps` 审计路径触发; `/sys/module`、`/proc/modules` 走 direct syscall, libc 文件 API 伪装不能覆盖。

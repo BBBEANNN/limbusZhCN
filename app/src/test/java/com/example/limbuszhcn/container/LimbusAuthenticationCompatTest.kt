@@ -26,6 +26,31 @@ class LimbusAuthenticationCompatTest {
             "example.other", ""))
     }
 
+    /** 验证只跳过会在 Unity 长耗时装载窗口触发 ShadowService ANR 的 Firebase Sessions 服务。 */
+    @Test
+    fun skipsOnlyLimbusFirebaseSessionLifecycleService() {
+        assertTrue(LimbusAuthenticationCompat.shouldSkipNonCriticalFirebaseSessionService(
+            "com.ProjectMoon.LimbusCompany",
+            "com.ProjectMoon.LimbusCompany",
+            "com.google.firebase.sessions.SessionLifecycleService"
+        ))
+        assertFalse(LimbusAuthenticationCompat.shouldSkipNonCriticalFirebaseSessionService(
+            "com.ProjectMoon.LimbusCompany",
+            "com.ProjectMoon.LimbusCompany",
+            "com.google.firebase.auth.api.fallback.service.FirebaseAuthFallbackService"
+        ))
+        assertFalse(LimbusAuthenticationCompat.shouldSkipNonCriticalFirebaseSessionService(
+            "com.google.android.gms",
+            "com.ProjectMoon.LimbusCompany",
+            "com.google.firebase.sessions.SessionLifecycleService"
+        ))
+        assertFalse(LimbusAuthenticationCompat.shouldSkipNonCriticalFirebaseSessionService(
+            "com.ProjectMoon.LimbusCompany",
+            "example.other",
+            "com.google.firebase.sessions.SessionLifecycleService"
+        ))
+    }
+
     /** 验证只接受游戏 manifest 声明的两个 Firebase Auth 回调 URI。 */
     @Test
     fun resolvesOnlyExactFirebaseAuthRedirects() {

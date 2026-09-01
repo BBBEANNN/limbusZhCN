@@ -69,6 +69,7 @@ import com.lody.virtual.client.stub.InstallerSetting;
 import com.lody.virtual.client.stub.StubManifest;
 import com.lody.virtual.helper.compat.ActivityManagerCompat;
 import com.lody.virtual.helper.compat.LimbusActivityCompat;
+import com.lody.virtual.helper.compat.LimbusAuthenticationCompat;
 import com.lody.virtual.helper.compat.BuildCompat;
 import com.lody.virtual.helper.compat.BundleCompat;
 import com.lody.virtual.helper.compat.IntentCompat;
@@ -1605,6 +1606,19 @@ class MethodProxies {
                 Log.i("LimbusVA", getMethodName() + " rewrite system bind caller old="
                         + oldCallingPackage + " new=" + MethodProxy.getHostPkg()
                         + " app=" + MethodProxy.getAppPkg());
+            }
+            ComponentName explicitComponent = service == null ? null : service.getComponent();
+            if (explicitComponent != null
+                    && LimbusAuthenticationCompat.shouldSkipNonCriticalFirebaseSessionService(
+                            MethodProxy.getAppPkg(),
+                            explicitComponent.getPackageName(),
+                            explicitComponent.getClassName())) {
+                // Unity/AppSealing 首次解压可能超过 20 秒；此时启动宿主 ShadowService 会触发
+                // 系统的 executing-service ANR。Firebase Sessions 仅提供统计会话，不参与登录。
+                Log.i("LimbusVA", getMethodName()
+                        + " skip non-critical Firebase Sessions service during Limbus startup service="
+                        + explicitComponent + " flags=" + flags);
+                return 0;
             }
             if (LIMBUS_PACKAGE.equals(MethodProxy.getAppPkg())) {
                 // Install this before every early-return and resolution branch. Vendor ROMs may

@@ -94,6 +94,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Skip only Limbus' non-critical Firebase `SessionLifecycleService` binding during startup, preventing its host `ShadowService` from reaching Android's executing-service ANR timeout while AppSealing synchronously decompresses the v461 Unity native payload on the main thread.
 - Stabilize Chinese TMP rendering by rebinding the matching font material whenever the runtime switches fonts, preventing intermittent broken glyphs and garbled labels.
 - Preserve readable game UI layouts with single-line auto-sizing and ellipsis for short labels, original-size multiline descriptions, and a 35-point formation-list label.
 - Apply a consistent 150% line height to personality-card titles across formation, arrangement, and selection pages.

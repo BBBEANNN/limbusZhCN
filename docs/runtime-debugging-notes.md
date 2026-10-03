@@ -184,10 +184,11 @@ Issue #3 的 Redmi K80 / Android 16 / Limbus v462 诊断包确认了同一回调
 故障路径。AppSealing 先报告 `30010`，其终止信号被容器阻断；随后后台 `Thread-7` 从
 `libcovault-appsec.so` 文件映射 `+0x248e0`（换算为 ELF 装载基址 `+0xd18e0`）跳到
 未映射回调 `0x18`，且 `PC == si_addr == x2`。此时 Unity 已走到 `PlayDone`，历史退出记录
-明确为 `p0 / SIGNALED / status=11`。运行时只在该 LR、低地址回调、`Thread-*` 非主线程、
-栈参数关系和稳定寄存器全部匹配时，用原始 `__NR_exit` 结束当前保护库后台线程。检查必须
-发生在调用下游 AppSealing handler 之前，避免其进程级退出路径扩大故障；其他同步
-`SIGSEGV` 仍完整交给原 handler 或默认终止。
+明确为 `p0 / SIGNALED / status=11`。Redmi K70 Pro / Android 16 / Limbus v478 诊断包进一步
+确认：在完全相同的 LR、栈参数和稳定寄存器特征下，跳转目标除 `0x18` 外亦可表现为 `0x0`
+或 `0x1000`。运行时只在该 LR、低地址/空回调、`Thread-*` 非主线程、栈参数关系和稳定寄存器
+全部匹配时，用原始 `__NR_exit` 结束当前保护库后台线程。检查必须发生在调用下游 AppSealing
+handler 之前，避免其进程级退出路径扩大故障；其他同步 `SIGSEGV` 仍完整交给原 handler 或默认终止。
 
 ## Android 16 / ColorOS 16 兼容结论
 

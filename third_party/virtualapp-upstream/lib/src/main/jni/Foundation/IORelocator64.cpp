@@ -1971,6 +1971,9 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
     bool issue3_stack_arguments_match = sp <= UINTPTR_MAX - 0x558
             && registers[1] == sp + 0x558
             && registers[4] == sp + 0xc8;
+    bool issue3_invalid_callback_address = pc == kIssue3InvalidCallbackAddress
+            || pc == 0
+            || pc <= 0x1000;
     if (context != nullptr
             && info != nullptr
             && info->si_code == SEGV_MAPERR
@@ -1979,7 +1982,7 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
             && lr_mapped
             && appsealing_base != 0
             && lr == appsealing_base + kIssue3InvalidCallbackReturnOffset
-            && pc == kIssue3InvalidCallbackAddress
+            && issue3_invalid_callback_address
             && address == pc
             && registers[2] == pc
             && issue3_stack_arguments_match

@@ -47,6 +47,7 @@
 #include "IORelocator.h"
 #include "LimbusTranslationRuntime.h"
 #include "MapsRedirector.h"
+#include "LimbusNativeCompat.h"
 #include "SandboxFs.h"
 #include "canonicalize_md.h"
 #include "Symbol.h"
@@ -1191,7 +1192,46 @@ hook_function(void *handle, const char *symbol, void *new_func, void **old_func)
         ALOGE("Not found symbol : %s", symbol);
         return;
     }
-    MSHookFunction(addr, new_func, old_func);
+    // bionic 的 open/open64 等可能导出同一个地址，不能把第一次跳转内嵌的指针再当指令搬运。
+    struct InstalledIoHook {
+        void *address;
+        void *replacement;
+        void *original;
+        const char *symbol;
+    };
+    static InstalledIoHook installed[128] = {};
+    static size_t installed_count = 0;
+    static pthread_mutex_t installed_lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&installed_lock);
+    for (size_t index = 0; index < installed_count; ++index) {
+        const InstalledIoHook &existing = installed[index];
+        if (existing.address != addr) continue;
+        if (existing.replacement == new_func
+                || limbus_equivalent_io_aliases(existing.symbol, symbol)) {
+            if (old_func != nullptr) *old_func = existing.original;
+            ALOGE("IO hook >>> reuse libc alias %s -> %s address=%p original=%p",
+                  symbol, existing.symbol, addr, existing.original);
+        } else {
+            // 未知的同址不同语义 hook 不可组合；明确拒绝第二次改写，避免损坏既有跳板。
+            ALOGE("IO hook >>> reject conflicting hook %s / %s address=%p",
+                  symbol, existing.symbol, addr);
+        }
+        pthread_mutex_unlock(&installed_lock);
+        return;
+    }
+    if (installed_count == sizeof(installed) / sizeof(installed[0])) {
+        ALOGE("IO hook >>> registry capacity exceeded symbol=%s", symbol);
+        pthread_mutex_unlock(&installed_lock);
+        return;
+    }
+    void *original = limbus_install_published_inline_hook(
+            MSHookFunction, addr, new_func, old_func);
+    if (original != nullptr) {
+        installed[installed_count++] = {addr, new_func, original, symbol};
+    } else {
+        ALOGE("IO hook >>> installation failed symbol=%s address=%p", symbol, addr);
+    }
+    pthread_mutex_unlock(&installed_lock);
 }
 
 void onSoLoaded(const char *name, void *handle);
@@ -1810,12 +1850,19 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
     uintptr_t lr = 0;
     uintptr_t sp = 0;
     uintptr_t registers[16] = {};
+    LimbusSignalContextSnapshot original_context = {};
 #if defined(__aarch64__)
     if (context != nullptr) {
         auto *ucontext = reinterpret_cast<ucontext_t *>(context);
         pc = static_cast<uintptr_t>(ucontext->uc_mcontext.pc);
         lr = static_cast<uintptr_t>(ucontext->uc_mcontext.regs[30]);
         sp = static_cast<uintptr_t>(ucontext->uc_mcontext.sp);
+        original_context.pc = ucontext->uc_mcontext.pc;
+        original_context.sp = ucontext->uc_mcontext.sp;
+        original_context.pstate = ucontext->uc_mcontext.pstate;
+        for (size_t i = 0; i < 31; ++i) {
+            original_context.regs[i] = ucontext->uc_mcontext.regs[i];
+        }
         for (size_t i = 0; i < 16; ++i) {
             registers[i] = static_cast<uintptr_t>(ucontext->uc_mcontext.regs[i]);
         }
@@ -1857,6 +1904,29 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
         }
     }
 #endif
+    // 先交下游处理正常 ART 隐式检查；已消费的信号无需打印错误日志或扫描映射。
+    const struct sigaction action = g_limbus_sigsegv_action;
+    bool downstream_called = false;
+    if (info == nullptr || info->si_code > 0) {
+        if ((action.sa_flags & SA_SIGINFO) != 0 && action.sa_sigaction != nullptr
+                && action.sa_sigaction != limbus_sigsegv_guard) {
+            action.sa_sigaction(sig, info, context);
+            downstream_called = true;
+        } else if (action.sa_handler != SIG_DFL && action.sa_handler != SIG_IGN
+                && action.sa_handler != nullptr) {
+            action.sa_handler(sig);
+            downstream_called = true;
+        }
+        if (downstream_called) {
+            if (context == nullptr) return;
+#if defined(__aarch64__)
+            const auto *updated = reinterpret_cast<const ucontext_t *>(context);
+            if (limbus_machine_context_changed(original_context, updated->uc_mcontext)) return;
+#else
+            return;
+#endif
+        }
+    }
     cursor = limbus_signal_append_text(cursor, end, "Limbus SIGSEGV guard: si_code=");
     cursor = limbus_signal_append_signed(cursor, end, info != nullptr ? info->si_code : 0);
     cursor = limbus_signal_append_text(cursor, end, " tid=");
@@ -1887,37 +1957,11 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
         cursor = limbus_signal_append_text(cursor, end, "=");
         cursor = limbus_signal_append_hex(cursor, end, registers[i]);
     }
-#if defined(__aarch64__)
-    bool pc_mapped = limbus_signal_is_mapped(pc);
-    bool lr_mapped = limbus_signal_is_mapped(lr);
-    cursor = limbus_signal_append_text(cursor, end, " pc_mapped=");
-    cursor = limbus_signal_append_signed(cursor, end, pc_mapped ? 1 : 0);
-    cursor = limbus_signal_append_text(cursor, end, " lr_mapped=");
-    cursor = limbus_signal_append_signed(cursor, end, lr_mapped ? 1 : 0);
-    if (pc_mapped && (pc & 0xfffU) <= 0xff0U) {
-        /*
-         * 仅在 mincore 确认当前页存在、且四条指令不会跨页时读取，避免诊断逻辑
-         * 对已经损坏的 PC 再次触发嵌套 SIGSEGV。
-         */
-        const auto *instructions = reinterpret_cast<const volatile uint32_t *>(pc);
-        for (size_t i = 0; i < 4; ++i) {
-            cursor = limbus_signal_append_text(cursor, end, " insn");
-            cursor = limbus_signal_append_signed(cursor, end, static_cast<long>(i));
-            cursor = limbus_signal_append_text(cursor, end, "=");
-            cursor = limbus_signal_append_hex(cursor, end, instructions[i]);
-        }
-    }
-#endif
+    // 只记录初始化阶段缓存的模块摘要；未知范围不等于未映射，也不能据此读取指令。
     cursor = limbus_signal_append_text(cursor, end, " ");
     cursor = limbus_signal_append_module(cursor, end, "pc_module=", pc);
     cursor = limbus_signal_append_text(cursor, end, " ");
     cursor = limbus_signal_append_module(cursor, end, "lr_module=", lr);
-#if defined(__aarch64__)
-    cursor = limbus_signal_append_text(cursor, end, " ");
-    cursor = limbus_signal_append_proc_map(cursor, end, "pc_map=", pc);
-    cursor = limbus_signal_append_text(cursor, end, " ");
-    cursor = limbus_signal_append_proc_map(cursor, end, "lr_map=", lr);
-#endif
     *cursor++ = '\n';
     *cursor = '\0';
     size_t diagnostic_length = static_cast<size_t>(cursor - diagnostic);
@@ -1930,26 +1974,8 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
         return;
     }
 
-    struct sigaction action = g_limbus_sigsegv_action;
-    if ((action.sa_flags & SA_SIGINFO) != 0
-            && action.sa_sigaction != nullptr
-            && action.sa_sigaction != limbus_sigsegv_guard) {
-        /*
-         * ART 会把 Java 隐式空指针检查实现为同步 SIGSEGV。它的处理器会修改
-         * ucontext，把执行流切换到异常投递入口，然后正常返回。这里必须遵守
-         * POSIX 信号链语义：下游自定义处理器返回后继续使用其更新后的上下文，
-         * 不能再恢复默认动作并二次投递 SIGSEGV，否则 Android 16 上任意一次
-         * Java 隐式检查都会被误杀成原生崩溃。
-         */
-        action.sa_sigaction(sig, info, context);
+    if (downstream_called) {
 #if defined(__aarch64__)
-        if (context != nullptr) {
-            const auto *updated_context = reinterpret_cast<const ucontext_t *>(context);
-            uintptr_t updated_pc = static_cast<uintptr_t>(updated_context->uc_mcontext.pc);
-            uintptr_t updated_sp = static_cast<uintptr_t>(updated_context->uc_mcontext.sp);
-            if (updated_pc != pc || updated_sp != sp) {
-                return;
-            }
 #if defined(__NR_exit) && defined(__NR_gettid) && defined(__NR_getpid)
             /*
              * vivo V2314A / Android 13 的 v1.2 回归日志确认：AppSealing 后台 Thread-5
@@ -1991,38 +2017,11 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
                 }
             }
 #endif
-            /*
-             * 同步故障的下游处理器若原样返回，CPU 会再次执行同一条故障指令，
-             * 形成 Issue #1 中每毫秒一次的 SIGSEGV/日志死循环。此时不能假装
-             * 信号已被消费，必须继续走下面的默认终止语义。
-             */
-            static const char unchanged_message[] =
-                    "Limbus SIGSEGV guard: downstream handler left fault context unchanged\n";
-            syscall(__NR_write, STDERR_FILENO,
-                    unchanged_message, sizeof(unchanged_message) - 1);
-        } else {
-            return;
-        }
-#else
-        return;
 #endif
-    } else if (action.sa_handler != SIG_DFL && action.sa_handler != SIG_IGN
-            && action.sa_handler != nullptr) {
-        // 传统单参数处理器也必须实际改变同步故障上下文，否则会重试同一指令。
-        action.sa_handler(sig);
-#if defined(__aarch64__)
-        if (context != nullptr) {
-            const auto *updated_context = reinterpret_cast<const ucontext_t *>(context);
-            if (static_cast<uintptr_t>(updated_context->uc_mcontext.pc) != pc
-                    || static_cast<uintptr_t>(updated_context->uc_mcontext.sp) != sp) {
-                return;
-            }
-        } else {
-            return;
-        }
-#else
-        return;
-#endif
+        // 下游未改变任何执行状态时仍保留真实故障的终止语义，避免原样重试的无限循环。
+        static const char unchanged_message[] =
+                "Limbus SIGSEGV guard: downstream handler left full fault context unchanged\n";
+        syscall(__NR_write, STDERR_FILENO, unchanged_message, sizeof(unchanged_message) - 1);
     }
 
     // 没有可调用的下游处理器时才保留真实 SIGSEGV 的默认终止语义。

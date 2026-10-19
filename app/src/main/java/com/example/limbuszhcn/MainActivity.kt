@@ -289,7 +289,7 @@ class MainActivity : ComponentActivity() {
                         runTask("正在重新同步游戏并启动") {
                             val prepared = prepareGame(forceSync = true)
                             containerRuntime.launchGame()
-                            "$prepared，已启动游戏"
+                            "$prepared，已请求启动游戏"
                         }
                     },
                     onLaunchTranslatedGame = {
@@ -314,9 +314,9 @@ class MainActivity : ComponentActivity() {
                             runOnUiThread { lastInstall = active }
                             containerRuntime.launchGame()
                             if (update.isFailure && previous != null) {
-                                "$prepared；联网检查失败，已使用汉化 ${previous.version} 启动"
+                                "$prepared；联网检查失败，使用汉化 ${previous.version}，已请求启动游戏"
                             } else {
-                                "$prepared；${installResultMessage(summary)}；已启动游戏"
+                                "$prepared；${installResultMessage(summary)}；已请求启动游戏"
                             }
                         }
                     },

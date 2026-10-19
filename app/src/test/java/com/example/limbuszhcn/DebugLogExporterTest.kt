@@ -1,5 +1,6 @@
 package com.example.limbuszhcn
 
+import android.app.ApplicationExitInfo
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -43,6 +44,54 @@ class DebugLogExporterTest {
 
         assertTrue(result.startsWith("[truncated to recent data]"))
         assertTrue(result.endsWith("RECENT-END"))
+        assertTrue(result.toByteArray(Charsets.UTF_8).size <= 64)
+    }
+
+    /** 验证零预算与提示附近的小预算仍遵守总上限，空间紧张时优先保留最新文本。 */
+    @Test
+    fun countsTruncationNoticeInsideEveryTextBudget() {
+        val source = "old-data".repeat(100) + "RECENT-END"
+        val notice = "[truncated to recent data]\n"
+        assertEquals("", source.redactedAndBounded(0))
+        assertEquals("", source.redactedAndBounded(-1))
+        for (limit in 1..notice.length + 5) {
+            val result = source.redactedAndBounded(limit)
+            assertTrue("limit=$limit", result.toByteArray(Charsets.UTF_8).size <= limit)
+            if (limit < notice.length + 4) {
+                assertEquals(source.takeLast(limit), result)
+            } else {
+                assertTrue(result.startsWith(notice))
+                assertTrue(source.endsWith(result.removePrefix(notice)))
+            }
+        }
+    }
+
+    /** 验证中文和四字节 emoji 的半字符不会转成 U+FFFD，尾部字符顺序也保持不变。 */
+    @Test
+    fun truncatesOnlyAtCompleteUtf8CharacterBoundaries() {
+        val source = "历史记录".repeat(100) + "最新设置🙂"
+        val notice = "[truncated to recent data]\n"
+        for (limit in 0..80) {
+            val result = source.redactedAndBounded(limit)
+            assertTrue("limit=$limit", result.toByteArray(Charsets.UTF_8).size <= limit)
+            assertFalse("limit=$limit", result.contains('\uFFFD'))
+            assertTrue("limit=$limit", source.endsWith(result.removePrefix(notice)))
+        }
+        assertEquals("", source.redactedAndBounded(3))
+        assertEquals("🙂", source.redactedAndBounded(4))
+        assertEquals("置🙂", source.redactedAndBounded(7))
+    }
+
+    /** 验证 ANR 最终写入的字节含提示仍不超限，中文截断不会引入替换字符。 */
+    @Test
+    fun boundsEncodedAnrTraceIncludingNoticeAndMultibyteTail() {
+        val source = ("UnityMain 历史等待锁\n".repeat(100) + "最新设置🙂").toByteArray(Charsets.UTF_8)
+        for (limit in listOf(0, 1, 2, 3, 4, 7, 25, 26, 27, 29, 30, 64)) {
+            val trace = prepareDiagnosticExitTrace(ApplicationExitInfo.REASON_ANR, source, limit)
+            assertEquals("txt", trace.extension)
+            assertTrue("limit=$limit", trace.bytes.size <= limit)
+            assertFalse("limit=$limit", String(trace.bytes, Charsets.UTF_8).contains('\uFFFD'))
+        }
     }
 
     /** 验证二进制脱敏保持 protobuf 结构字节、总长度和非敏感文本不变。 */
@@ -63,5 +112,48 @@ class DebugLogExporterTest {
         assertFalse(printable.contains("user@example.com"))
         assertFalse(printable.contains("live-secret"))
         assertTrue(printable.contains("safe=kept"))
+    }
+
+    /** 验证 ANR 使用可直接阅读的脱敏文本，保留 Unicode 线程栈而不伪装为 protobuf。 */
+    @Test
+    fun exportsAnrTraceAsRedactedUtf8Text() {
+        val source = "UnityMain 等待锁\naccount=user@example.com token=live-secret\n at 游戏设置.apply()"
+        val trace = prepareDiagnosticExitTrace(
+            ApplicationExitInfo.REASON_ANR, source.toByteArray(Charsets.UTF_8), 16 * 1024
+        )
+        val text = String(trace.bytes, Charsets.UTF_8)
+
+        assertEquals("txt", trace.extension)
+        assertTrue(text.contains("UnityMain 等待锁"))
+        assertTrue(text.contains("游戏设置.apply()"))
+        assertFalse(text.contains("user@example.com"))
+        assertFalse(text.contains("live-secret"))
+    }
+
+    /** 验证已恢复 ANR 的文本即使随其他退出原因保留，也仍使用可读文本格式。 */
+    @Test
+    fun preservesRecoveredAnrTextForLaterSignalExit() {
+        val trace = prepareDiagnosticExitTrace(
+            ApplicationExitInfo.REASON_SIGNALED,
+            "old-data".repeat(50).plus("\nUnityMain RECENT-END").toByteArray(), 64
+        )
+
+        assertEquals("txt", trace.extension)
+        assertTrue(String(trace.bytes).endsWith("UnityMain RECENT-END"))
+    }
+
+    /** 验证 native tombstone 不会被 UTF-8 解码或截断破坏，凭据仍必须等长覆盖。 */
+    @Test
+    fun exportsNativeTraceAsLengthPreservingProtobuf() {
+        val prefix = byteArrayOf(0x82.toByte(), 0x01, 0x80.toByte(), 0xff.toByte())
+        val input = prefix + "token=live-secret safe=kept".toByteArray(Charsets.US_ASCII)
+        val trace = prepareDiagnosticExitTrace(ApplicationExitInfo.REASON_CRASH_NATIVE, input, 8)
+
+        assertEquals("pb", trace.extension)
+        assertEquals(input.size, trace.bytes.size)
+        assertArrayEquals(prefix, trace.bytes.copyOfRange(0, prefix.size))
+        assertFalse(String(trace.bytes, Charsets.ISO_8859_1).contains("live-secret"))
+        assertTrue(String(trace.bytes, Charsets.ISO_8859_1).contains("safe=kept"))
+        assertArrayEquals(prefix, input.copyOfRange(0, prefix.size))
     }
 }

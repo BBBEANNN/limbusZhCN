@@ -69,6 +69,7 @@ import com.lody.virtual.client.stub.InstallerSetting;
 import com.lody.virtual.client.stub.StubManifest;
 import com.lody.virtual.helper.compat.ActivityManagerCompat;
 import com.lody.virtual.helper.compat.LimbusActivityCompat;
+import com.lody.virtual.helper.compat.LimbusAuthenticationCompat;
 import com.lody.virtual.helper.compat.BuildCompat;
 import com.lody.virtual.helper.compat.BundleCompat;
 import com.lody.virtual.helper.compat.IntentCompat;
@@ -1605,6 +1606,19 @@ class MethodProxies {
                 Log.i("LimbusVA", getMethodName() + " rewrite system bind caller old="
                         + oldCallingPackage + " new=" + MethodProxy.getHostPkg()
                         + " app=" + MethodProxy.getAppPkg());
+            }
+            ComponentName explicitComponent = service == null ? null : service.getComponent();
+            if (explicitComponent != null
+                    && LimbusAuthenticationCompat.shouldSkipNonCriticalFirebaseSessionService(
+                            MethodProxy.getAppPkg(),
+                            explicitComponent.getPackageName(),
+                            explicitComponent.getClassName())) {
+                // 仅拒绝游戏自己的会话统计组件，避免在 Unity 同步装载窗口创建 ShadowService。
+                // 返回真实的绑定失败语义，不能伪造连接成功或扩大到 Firebase Auth/GMS 服务。
+                Log.i("LimbusVA", getMethodName()
+                        + " skip non-critical Firebase Sessions service service="
+                        + explicitComponent + " flags=" + flags);
+                return 0;
             }
             if (LIMBUS_PACKAGE.equals(MethodProxy.getAppPkg())) {
                 // Install this before every early-return and resolution branch. Vendor ROMs may

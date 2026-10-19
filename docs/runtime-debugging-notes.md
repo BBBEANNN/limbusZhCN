@@ -180,6 +180,28 @@ AppSealing 后台 `Thread-5` 会稳定在 `libcovault-appsec.so +0x248d4` 以空
 默认 SIGSEGV（会杀死整个游戏），也不能返回重试（会死循环）；运行时必须同时核对基址、
 偏移、故障地址、寄存器、指令和非主线程身份后，仅以原始 `exit` 隔离当前后台线程。
 
+## Issue #1、#4、#6 登录边界复核（2026-10-19）
+
+- Issue #1 的 `20260911-115917` 最新诊断在 `11:59:08` 记录 microG UI 的
+  `Theme.AppCompat` 异常。Credentials 和 microG 的 client-local 路由已经命中，
+  失败发生在 Activity 的 `onPostCreate()`。仅恢复目标 Resources 或调用
+  `setTheme(ActivityInfo.theme)` 不够：未单独声明主题的页面必须继承目标应用主题，
+  并在 `ActivityFixer` 首次读取主题前使用目标 Resources 创建新 Theme。范围仅为
+  `com.google.android.gms` 内的 `AssistedSignInActivity` 和 `AuthSignInActivity`。
+- Issue #4 的旧修复提交 `964cb68` 尚未包含在本次检查的 main `997dde5` 中。
+  Issue #6 的 `20260915-042302` 诊断再次证明同一问题：`04:22:39` 的
+  `GoogleApiHandler` 经 `VAContentProviderProxy` 发起 Provider 调用后抛出
+  `Calling uid: 10611 doesn't match source uid: 10001`。Android 12 及以上的
+  Provider AttributionSource 与本地 Binder 身份须统一使用宿主物理 UID/PID/包名；
+  Android 11 及以下保留原虚拟身份。该修复不改变容器内部 Provider 解析或 GMS broker。
+- Issue #6 同一诊断还保留了较早一次 `AuthSignInActivity -> AssistedSignInActivity ->
+  HiddenActivity` 的 Activity result 记录，不能把所有黑屏都归因于回调未送达。
+- Issue #1 的 Apple 登录仍缺少能证明浏览器回调返回容器的最新日志。现有宿主
+  `genericidp`/`recaptcha` 回调白名单应保留；不能仅凭浏览器显示成功宣称游戏已登录。
+
+本轮没有连接原设备。单元测试和 APK 构建只验证策略及编译，不替代 vivo/Android 13、
+Redmi/Android 16 和 OnePlus/ColorOS 16 上的账号选择、结果回传及 Apple 登录实测。
+
 ## Android 16 / ColorOS 16 兼容结论
 
 2026-08-08 在 PHY110、Android 16（API 36）和 Limbus v1.109.1 上完成真机验证。启动已

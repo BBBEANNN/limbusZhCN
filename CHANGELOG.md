@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Issue fixes reviewed on 2026-10-19
+
+- 修复 Android 12+ Provider 使用虚拟 UID 导致 Google 登录 AttributionSource 校验失败的问题（#4、#6）。
+- 提前重建 microG 两层登录页的目标主题，避免继承宿主主题后发生 AppCompat 崩溃（#1）。
+- 修复 libc 同址别名重复 inline hook 导致启动跳板损坏的问题，并补齐 ARM64 有符号偏移、ADRP、容量及内核页边界回归（#5、#9）。
+- 完整比较下游信号处理器的通用寄存器、PC、SP、PSTATE；正常 ART 隐式检查不再输出长错误日志，未知同步故障仍保留终止语义。
+- 移植精确限制 Firebase Sessions 统计服务绑定的候选兼容策略（#2），不影响其它认证服务。
+- 正确导出脱敏 ANR 文本并说明缺失原因，文本截断包含提示的总字节数受限且保持 UTF-8 完整（#7 诊断改进）。
+- 区分启动请求成功和游戏实际就绪，拒绝正数非致命启动错误码；15 个开放 issue 的逐项结论见 `docs/issue-resolution-status.md`。
+- 以上改动已安排离线回归；原设备验收尚未完成，不据此关闭 issue 或宣称所有启动问题已根治。
+
 ### Added
 
 - Add exact Firebase Auth `genericidp`/`recaptcha` browser redirect routing back into the containerized Limbus activities for Apple ID and reCAPTCHA completion.

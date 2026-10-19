@@ -20,7 +20,17 @@ import java.time.format.DateTimeFormatter
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
+/**
+ * 在应用权限与大小边界内导出经过脱敏的运行诊断，不读取游戏资源或账号配置。
+ */
 internal class DebugLogExporter(private val context: Context) {
+    /**
+     * 汇总当前版本、容器状态、本应用日志及系统保留的历史退出 trace。
+     *
+     * @param containerStatus 已由容器管理层取得的当前状态
+     * @param activeTranslation 当前激活的汉化摘要，尚未激活时为空
+     * @return 可通过系统分享面板导出的诊断 ZIP 文件
+     */
     fun export(
         containerStatus: ContainerStatus,
         activeTranslation: PatchInstallSummary?
@@ -56,8 +66,8 @@ internal class DebugLogExporter(private val context: Context) {
             val exits = collectExitReasons()
             zip.writeText("process-exits.txt", exits.summary)
             exits.traces.forEachIndexed { index, trace ->
-                // Native tombstone 是 protobuf 二进制；按 UTF-8 写回会破坏地址和字段长度。
-                zip.writeBytes("exit-trace-${index + 1}.pb", trace.bytes)
+                // ANR 是可读线程栈，native tombstone 才是 protobuf，不能统一按二进制命名。
+                zip.writeBytes("exit-trace-${index + 1}.${trace.extension}", trace.bytes)
             }
         }
         require(output.length() <= MAX_ARCHIVE_BYTES) {
@@ -171,14 +181,18 @@ internal class DebugLogExporter(private val context: Context) {
                 traces = emptyList()
             )
         }
-        val traces = mutableListOf<ExitTrace>()
+        val traces = mutableListOf<PreparedExitTrace>()
         val summary = buildString {
             appendLine("count=${reasons.size}")
+            appendLine("note=historical records only; a running frozen process may have no exit trace")
             reasons.forEachIndexed { index, reason ->
                 appendLine()
                 appendLine("[$index]")
                 appendLine("timestamp=${Instant.ofEpochMilli(reason.timestamp)}")
                 appendLine("process=${reason.processName}")
+                appendLine("pid=${reason.pid}")
+                appendLine("realUid=${reason.realUid}")
+                appendLine("packageUid=${reason.packageUid}")
                 appendLine("reason=${exitReasonName(reason.reason)}(${reason.reason})")
                 appendLine("status=${reason.status}")
                 appendLine("importance=${reason.importance}")
@@ -186,18 +200,35 @@ internal class DebugLogExporter(private val context: Context) {
                 appendLine("rssKb=${reason.rss}")
                 appendLine("description=${reason.description.orEmpty()}")
                 if (traces.size < MAX_EXIT_TRACES) {
-                    val trace = runCatching {
+                    val traceResult = runCatching {
                         reason.traceInputStream?.use { trace ->
                             trace.readBinaryAtMost(MAX_EXIT_TRACE_BYTES)
                         }
-                    }.getOrNull()
-                    if (trace?.exceededLimit == true) {
-                        // 截断 protobuf 会得到无法解析的假栈，因此超限时只在摘要中说明。
-                        appendLine("traceSkipped=exceeds-${MAX_EXIT_TRACE_BYTES}-bytes")
-                    } else if (trace != null && trace.bytes.isNotEmpty()) {
-                        traces += ExitTrace(trace.bytes.redactedBinaryCopy())
-                        appendLine("traceFile=exit-trace-${traces.size}.pb")
                     }
+                    val trace = traceResult.getOrNull()
+                    when {
+                        traceResult.isFailure -> {
+                            // 无权限和系统文件已被回收都应留下原因，不能让缺栈误读为没有故障。
+                            val error = traceResult.exceptionOrNull()
+                            appendLine("traceReadFailed=${error?.javaClass?.simpleName}: ${error?.message.orEmpty()}")
+                        }
+                        trace == null -> appendLine("traceUnavailable=not-retained-or-not-provided-by-system")
+                        trace.exceededLimit -> {
+                            // 不完整 protobuf 不可解析；ANR 也保留相同单项上限，不扩大采集范围。
+                            appendLine("traceSkipped=exceeds-${MAX_EXIT_TRACE_BYTES}-bytes")
+                        }
+                        trace.bytes.isEmpty() -> appendLine("traceUnavailable=empty-system-trace")
+                        else -> {
+                            val prepared = prepareDiagnosticExitTrace(
+                                reason.reason, trace.bytes, MAX_EXIT_TRACE_BYTES
+                            )
+                            traces += prepared
+                            appendLine("traceFile=exit-trace-${traces.size}.${prepared.extension}")
+                            appendLine("traceFormat=${if (prepared.extension == "pb") "native-tombstone-protobuf" else "anr-text"}")
+                        }
+                    }
+                } else {
+                    appendLine("traceSkipped=archive-trace-count-limit")
                 }
             }
         }.redactedAndBounded(MAX_EXIT_SUMMARY_BYTES)
@@ -211,10 +242,10 @@ internal class DebugLogExporter(private val context: Context) {
     }
 
     /**
-     * 将已经完成等长脱敏的二进制诊断内容写入 ZIP。
+     * 将已经按真实格式脱敏的诊断内容写入 ZIP。
      *
      * @param name ZIP 内的条目名称
-     * @param bytes 保持 protobuf 字段边界的二进制内容
+     * @param bytes 已脱敏的 ANR UTF-8 文本或保持字段边界的 protobuf 二进制内容
      */
     private fun ZipOutputStream.writeBytes(name: String, bytes: ByteArray) {
         putNextEntry(ZipEntry(name))
@@ -322,9 +353,7 @@ internal class DebugLogExporter(private val context: Context) {
         else -> "REASON_$reason"
     }
 
-    private data class ExitDiagnostics(val summary: String, val traces: List<ExitTrace>)
-
-    private data class ExitTrace(val bytes: ByteArray)
+    private data class ExitDiagnostics(val summary: String, val traces: List<PreparedExitTrace>)
 
     private data class BoundedBinary(val bytes: ByteArray, val exceededLimit: Boolean)
 
@@ -344,12 +373,41 @@ internal class DebugLogExporter(private val context: Context) {
         private val README = """
             Limbus Company 汉化器 Issue 诊断包
 
-            内容：可复制的 Issue 模板、设备兼容信息、应用内滚动日志、本应用 UID 的近期日志、历史进程退出原因，以及等长脱敏的原生 tombstone protobuf。
+            内容：可复制的 Issue 模板、设备兼容信息、应用内滚动日志、本应用 UID 的近期日志、历史进程退出原因，以及脱敏的 ANR 文本或原生 tombstone protobuf。
             不包含：游戏资源、存档、PlayerPrefs、汉化渠道地址、Token 或账号配置。
             文本已经过自动脱敏，但公开上传前仍建议自行检查内容。
+            提示：仍在运行的卡死进程可能尚无历史退出记录；trace 是否保留由 Android 决定，缺失原因见 process-exits.txt。
         """.trimIndent() + "\n"
     }
 }
+
+/**
+ * 保存系统退出 trace 的真实格式与已脱敏内容，供 ZIP 文件名和摘要共同使用。
+ *
+ * @property extension 与内容格式对应的文件扩展名，native tombstone 为 pb，ANR 为 txt
+ * @property bytes 已执行格式对应脱敏的内容，不包含游戏资源或应用配置
+ */
+internal data class PreparedExitTrace(val extension: String, val bytes: ByteArray)
+
+/**
+ * 按 Android 的历史退出原因区分 native protobuf 与可读 ANR 线程栈。
+ *
+ * 系统可把一次已恢复 ANR 的文本保留到后续其他原因的退出记录中，所以只有
+ * REASON_CRASH_NATIVE 按 protobuf 处理，不能仅给 REASON_ANR 使用文本格式。
+ *
+ * @param reason ApplicationExitInfo 提供的退出原因
+ * @param bytes 系统返回、已通过单项大小检查的完整 trace
+ * @param maxTextBytes 文本脱敏后的最大保留字节数
+ * @return 文件扩展名与可写入公开诊断 ZIP 的脱敏内容
+ */
+internal fun prepareDiagnosticExitTrace(reason: Int, bytes: ByteArray, maxTextBytes: Int): PreparedExitTrace =
+    if (reason == ApplicationExitInfo.REASON_CRASH_NATIVE) {
+        // 二进制等长覆盖保持 protobuf 字段长度和地址；不能先经 UTF-8 解码。
+        PreparedExitTrace("pb", bytes.redactedBinaryCopy())
+    } else {
+        val text = String(bytes, Charsets.UTF_8).redactedAndBounded(maxTextBytes)
+        PreparedExitTrace("txt", text.toByteArray(Charsets.UTF_8))
+    }
 
 /**
  * 对 protobuf 等二进制内容中的可打印 ASCII 凭据执行等长覆盖。
@@ -385,7 +443,14 @@ internal fun ByteArray.redactedBinaryCopy(): ByteArray {
     return result
 }
 
+/**
+ * 脱敏诊断文本，并在包含截断提示的总字节预算内优先保留最新尾部。
+ *
+ * @param maxBytes 最终 UTF-8 内容的最大字节数，小于或等于零时不保留内容
+ * @return 已脱敏且不超过预算的文本，截断位置始终位于完整 UTF-8 字符之间
+ */
 internal fun String.redactedAndBounded(maxBytes: Int): String {
+    if (maxBytes <= 0) return ""
     var value = this
     value = URL_CREDENTIAL.replace(value) { match -> "${match.groupValues[1]}<redacted>@" }
     value = CREDENTIAL_FIELD.replace(value) { match -> "${match.groupValues[1]}<redacted>" }
@@ -396,10 +461,20 @@ internal fun String.redactedAndBounded(maxBytes: Int): String {
     value = EMAIL_ADDRESS.replace(value, "<redacted-email>")
     val bytes = value.toByteArray(Charsets.UTF_8)
     if (bytes.size <= maxBytes) return value
-    val suffix = bytes.copyOfRange(bytes.size - maxBytes, bytes.size)
-    return "[truncated to recent data]\n" + String(suffix, Charsets.UTF_8)
+    // 提示也占用单项预算；预算过小时省略提示，优先留下最近的完整字符。
+    // UTF-8 单个码点最多占四字节，只有还能容纳一个完整码点时才预留提示空间。
+    val notice = if (maxBytes >= TRUNCATION_NOTICE.length + 4) TRUNCATION_NOTICE else ""
+    val tailBudget = maxBytes - notice.length
+    var start = bytes.size - tailBudget
+    // 从任意字节截取可能把中文或 emoji 的续字节当作开头，解码会产生 U+FFFD 并再次膨胀。
+    // 跳过这些续字节后，仅丢弃预算边界上的半个字符，仍保留完整的最新尾部。
+    while (start < bytes.size && (bytes[start].toInt() and 0xc0) == 0x80) {
+        start++
+    }
+    return notice + String(bytes, start, bytes.size - start, Charsets.UTF_8)
 }
 
+private const val TRUNCATION_NOTICE = "[truncated to recent data]\n"
 private val URL_CREDENTIAL = Regex("(https?://)[^\\s/@:]+(?::[^\\s/@]*)?@", RegexOption.IGNORE_CASE)
 private val CREDENTIAL_FIELD = Regex(
     "([\\\"']?(?:authorization|access[_-]?token|refresh[_-]?token|token|api[_-]?key|secret|password)[\\\"']?\\s*[:=]\\s*)(?:bearer\\s+)?(?:\\\"[^\\\"]*\\\"|'[^']*'|[^\\s,;&]+)",

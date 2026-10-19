@@ -38,7 +38,8 @@
 ## Native / AppSealing 约束
 
 - Limbus native 终止路径只做容器进程内轻量拦截; `SIGPWR` / `SIGXCPU` 必须放行。
-- `SIGSEGV` 仅可忽略 `si_code <= 0` 的用户主动投递; 同步内存错误必须交回原 handler。若下游 handler 返回后 PC/SP 均未改变,表示它没有消费当前同步故障,必须恢复默认处理并终止,不得返回原指令形成信号/日志死循环。
+- `SIGSEGV` 仅可忽略 `si_code <= 0` 的用户主动投递; 同步内存错误必须交回原 handler。不得仅凭 PC/SP 未改变判定下游未消费信号,还须比较全部 ARM64 通用寄存器和 PSTATE。完整执行状态仍未改变时,当前兼容层保留默认终止语义,不得返回原指令形成信号/日志死循环;仅修复内存而不改变寄存器的厂商 handler 仍需设备证据。已消费的 ART 信号不输出长错误日志,signal 上下文不得读取 maps 或解引用未知 PC 指令。
+- libc 导出可能同址。IO hook 必须按真实地址登记,仅对相同 replacement 或明确 ABI/语义等价的别名复用原跳板;不得再次搬运已写入绝对跳转的前导指令。原函数输出槽必须在入口改写前由安装器发布,跳板容量须按字节检查并包含末尾回跳。
 - libc hook 必须保持公开 API 返回值语义。例如 `getcwd()` 成功时返回调用方 buffer 指针, 不能暴露 raw syscall 长度。
 - native 路径伪装必须覆盖 `readlinkat` / `syscall(__NR_readlinkat)` 和 `/proc/self/fd` 反向路径。
 - AppSealing 50040 已确认由 `/proc/self/maps` 审计路径触发; `/sys/module`、`/proc/modules` 走 direct syscall, libc 文件 API 伪装不能覆盖。

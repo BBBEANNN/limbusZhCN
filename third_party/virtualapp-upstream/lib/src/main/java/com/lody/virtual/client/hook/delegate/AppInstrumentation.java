@@ -34,6 +34,7 @@ import com.lody.virtual.client.stub.StubManifest;
 import com.lody.virtual.client.interfaces.IInjector;
 import com.lody.virtual.helper.compat.ActivityManagerCompat;
 import com.lody.virtual.helper.compat.BundleCompat;
+import com.lody.virtual.helper.compat.LimbusAuthenticationCompat;
 import com.lody.virtual.os.VUserHandle;
 import com.lody.virtual.remote.ClientConfig;
 import com.lody.virtual.remote.StubActivityRecord;
@@ -167,6 +168,8 @@ public final class AppInstrumentation extends InstrumentationDelegate implements
         ContextFixer.fixContext(activity);
         restoreTargetActivityContext(activity, targetInfo);
         applyLimbusThreadContextClassLoader(targetInfo, "callActivityOnCreate");
+        // ActivityFixer 会首次读取 Theme；必须先创建目标主题，避免缓存宿主 Stub 的非 AppCompat 样式。
+        restoreMicrogSignInTheme(activity, targetInfo);
         ActivityFixer.fixActivity(activity);
         // Unity 会在 Activity.onCreate() 内创建 PhoneWindow。必须在进入目标 Activity 之前完成
         // ColorOS 服务兜底，否则厂商导航栏策略会直接解引用尚未创建的服务并终止主线程。
@@ -202,6 +205,44 @@ public final class AppInstrumentation extends InstrumentationDelegate implements
         }
         super.callActivityOnCreate(activity, icicle);
         exposeMicrogLoginWebViewIfBridgeStalls(activity);
+    }
+
+    /**
+     * 在任何样式读取和目标生命周期之前，为精确的两层 microG 登录页新建目标主题。
+     *
+     * <p>仅调用 setTheme() 会复用已创建的宿主 Theme，且 ActivityInfo.theme 为零时不会
+     * 自动继承目标应用主题。这里使用目标 Resources 新建 Theme，防止 AppCompat 在
+     * onPostCreate() 读取不到必需属性后终止整个 GMS UI 进程。</p>
+     *
+     * @param activity 即将执行 onCreate 的目标页面
+     * @param targetInfo 最终虚拟 Activity 信息，可为空
+     */
+    private void restoreMicrogSignInTheme(Activity activity, ActivityInfo targetInfo) {
+        if (targetInfo == null) {
+            return;
+        }
+        int themeId = LimbusAuthenticationCompat.resolveMicrogSignInTheme(
+                VClient.get().getCurrentPackage(), targetInfo.packageName, targetInfo.name,
+                targetInfo.theme,
+                targetInfo.applicationInfo == null ? 0 : targetInfo.applicationInfo.theme);
+        if (themeId == 0) {
+            return;
+        }
+        try {
+            Resources resources = getTargetActivityResources(activity, targetInfo);
+            Resources.Theme targetTheme = resources.newTheme();
+            targetTheme.applyStyle(themeId, true);
+            // setTheme(Theme) 直接替换整个 Theme；不能把目标样式叠加到宿主已缓存的主题上。
+            activity.setTheme(targetTheme);
+            if (mirror.android.view.ContextThemeWrapper.mThemeResource != null) {
+                mirror.android.view.ContextThemeWrapper.mThemeResource.set(activity, themeId);
+            }
+            Log.i("LimbusVA", "Rebuilt microG sign-in target theme activity="
+                    + targetInfo.name + " theme=" + themeId);
+        } catch (Throwable error) {
+            Log.e("LimbusVA", "Unable to rebuild microG sign-in target theme activity="
+                    + targetInfo.name, error);
+        }
     }
 
     /**

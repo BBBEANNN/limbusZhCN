@@ -20,8 +20,52 @@ public final class LimbusAuthenticationCompat {
             "com.google.firebase.auth.internal.GenericIdpActivity";
     private static final String RECAPTCHA_ACTIVITY =
             "com.google.firebase.auth.internal.RecaptchaActivity";
+    private static final String FIREBASE_SESSION_LIFECYCLE_SERVICE =
+            "com.google.firebase.sessions.SessionLifecycleService";
+    private static final String MICROG_ASSISTED_SIGN_IN_ACTIVITY =
+            "org.microg.gms.auth.signin.AssistedSignInActivity";
+    private static final String MICROG_AUTH_SIGN_IN_ACTIVITY =
+            "org.microg.gms.auth.signin.AuthSignInActivity";
 
     private LimbusAuthenticationCompat() {
+    }
+
+    /**
+     * 判断 Provider 的系统边界是否必须采用 Binder 可验证的宿主物理身份。
+     *
+     * @param apiLevel 当前 Android API 级别
+     * @return Android 12（API 31）及以上返回 {@code true}，旧系统保留虚拟身份
+     */
+    public static boolean shouldUsePhysicalProviderIdentity(int apiLevel) {
+        return apiLevel >= 31;
+    }
+
+    /**
+     * 为两层已确认的 microG 登录页面选择目标主题，避免继承宿主 Stub 的主题缓存。
+     *
+     * <p>Activity 没有单独声明主题时应继承应用主题。其它包或页面返回零，由原有
+     * Activity 处理路径负责，避免把登录兼容扩大到未知组件。</p>
+     *
+     * @param currentPackage 当前虚拟进程绑定的包名
+     * @param activityPackage 目标 Activity 所属包名
+     * @param activityClass 目标 Activity 完整类名
+     * @param activityTheme Activity 自身声明的主题资源 ID，零表示未声明
+     * @param applicationTheme 目标应用声明的主题资源 ID，零表示未声明
+     * @return 应重建的目标主题 ID；不属于精确登录页面或无可用主题时返回零
+     */
+    public static int resolveMicrogSignInTheme(
+            String currentPackage,
+            String activityPackage,
+            String activityClass,
+            int activityTheme,
+            int applicationTheme) {
+        if (!GMS_PACKAGE.equals(currentPackage)
+                || !GMS_PACKAGE.equals(activityPackage)
+                || !(MICROG_ASSISTED_SIGN_IN_ACTIVITY.equals(activityClass)
+                || MICROG_AUTH_SIGN_IN_ACTIVITY.equals(activityClass))) {
+            return 0;
+        }
+        return activityTheme != 0 ? activityTheme : applicationTheme;
     }
 
     /**
@@ -45,6 +89,28 @@ public final class LimbusAuthenticationCompat {
                 ? ""
                 : nativeBridge.toLowerCase(Locale.ENGLISH);
         return normalizedBridge.contains("houdini") || normalizedBridge.contains("nb");
+    }
+
+    /**
+     * 判断是否应拒绝 Limbus 自身非关键的 Firebase 会话统计服务绑定。
+     *
+     * <p>该统计服务经容器启动宿主 ShadowService，会增加 Unity 原生库同步装载期间的
+     * 主线程服务执行消息。本策略沿用 Issue #2 的定向测试方案，只拒绝这一项统计组件，
+     * 避免把其服务超时风险带入游戏启动；Issue #2 的最终根因仍需原设备回归确认。
+     * Firebase Auth 和其他业务服务不会命中此条件。</p>
+     *
+     * @param currentPackage 当前虚拟客户端绑定的包名，可为空
+     * @param componentPackage 显式 Service 组件所属包名，可为空
+     * @param className 显式 Service 组件的完整类名，可为空
+     * @return 三项均精确匹配 Limbus 自身会话统计组件时返回 {@code true}
+     */
+    public static boolean shouldSkipNonCriticalFirebaseSessionService(
+            String currentPackage,
+            String componentPackage,
+            String className) {
+        return LIMBUS_PACKAGE.equals(currentPackage)
+                && LIMBUS_PACKAGE.equals(componentPackage)
+                && FIREBASE_SESSION_LIFECYCLE_SERVICE.equals(className);
     }
 
     /**

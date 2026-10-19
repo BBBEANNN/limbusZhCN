@@ -486,7 +486,8 @@ private class VirtualAppReflectionBridge(
             .getMethod("startActivity", Intent::class.java, Int::class.javaPrimitiveType)
             .invoke(manager, intent, 0) as Int
         Log.i(TAG, "VActivityManager.startActivity result=$result package=$packageName intent=${intent.describeForLog()}")
-        if (result < 0) {
+        // Android 的正数非致命拒绝码从 100 开始；仅判断负数会误报被中止的启动。
+        if (!isActivityStartAccepted(result)) {
             throw ContainerRuntimeUnavailableException("VirtualApp 启动失败: result=$result, package=$packageName, intent=$intent")
         }
     }

@@ -26,6 +26,8 @@ public final class LimbusAuthenticationCompat {
             "org.microg.gms.auth.signin.AssistedSignInActivity";
     private static final String MICROG_AUTH_SIGN_IN_ACTIVITY =
             "org.microg.gms.auth.signin.AuthSignInActivity";
+    private static final String MICROG_LOGIN_ACTIVITY =
+            "org.microg.gms.auth.login.LoginActivity";
 
     private LimbusAuthenticationCompat() {
     }
@@ -38,6 +40,58 @@ public final class LimbusAuthenticationCompat {
      */
     public static boolean shouldUsePhysicalProviderIdentity(int apiLevel) {
         return apiLevel >= 31;
+    }
+
+    /**
+     * 判断是否应让精确的 microG 登录页在当前进程内沿用系统 Activity 结果链。
+     *
+     * <p>AuthSignInActivity 没有 VAMS ActivityRecord，其子登录页若经过 VAMS 会丢失父
+     * token 和请求码。这里只放行同 GMS 包、同虚拟进程的 LoginActivity；其它登录页
+     * 或跨进程组件仍由既有路径处理，不泛化匹配 login 命名空间。</p>
+     *
+     * @param currentPackage 当前虚拟客户端包名
+     * @param currentProcess 当前虚拟客户端的完整进程名
+     * @param activityPackage 目标 Activity 所属包名
+     * @param activityClass 目标 Activity 完整类名
+     * @param activityProcess 已解析的目标 Activity 完整进程名
+     * @return 精确命中同包同进程 LoginActivity 时返回 {@code true}
+     */
+    public static boolean shouldUseClientLocalMicrogLoginActivity(
+            String currentPackage,
+            String currentProcess,
+            String activityPackage,
+            String activityClass,
+            String activityProcess) {
+        return GMS_PACKAGE.equals(currentPackage)
+                && GMS_PACKAGE.equals(activityPackage)
+                && MICROG_LOGIN_ACTIVITY.equals(activityClass)
+                && currentProcess != null
+                && !currentProcess.isEmpty()
+                && currentProcess.equals(activityProcess);
+    }
+
+    /**
+     * 恢复已确认的 microG 登录父子组件身份，避免新增登录页继承错误的调用方伪装。
+     *
+     * @param currentPackage 当前虚拟客户端包名
+     * @param activityPackage 目标 Activity 所属包名
+     * @param activityClass 目标 Activity 完整类名
+     * @return 已确认的直接父 Activity 类名；其它组件返回 {@code null}，保留系统调用身份
+     */
+    public static String resolveMicrogSignInCallingActivity(
+            String currentPackage,
+            String activityPackage,
+            String activityClass) {
+        if (!GMS_PACKAGE.equals(currentPackage) || !GMS_PACKAGE.equals(activityPackage)) {
+            return null;
+        }
+        if (MICROG_AUTH_SIGN_IN_ACTIVITY.equals(activityClass)) {
+            return MICROG_ASSISTED_SIGN_IN_ACTIVITY;
+        }
+        if (MICROG_LOGIN_ACTIVITY.equals(activityClass)) {
+            return MICROG_AUTH_SIGN_IN_ACTIVITY;
+        }
+        return null;
     }
 
     /**

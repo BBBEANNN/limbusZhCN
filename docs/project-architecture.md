@@ -143,6 +143,25 @@ The app maps this to GitHub's release API, reads the newest release from
 assets. It verifies the archive when GitHub publishes a SHA-256 digest, extracts
 the patch-cache layout, and activates the runtime index through `GameStorage`.
 
+If the public API responds with HTTP 403 or 429, discovery may fall back once to
+the same repository's public HTTPS Releases page. Only GitHub's
+`include-fragment` link to `releases/expanded_assets/<numeric-tag>` identifies the
+release; only the exact `LimbusLocalize_<version>.7z` asset row in that official
+fragment supplies its download URL. The fallback requires the SHA-256 published
+for that same asset row, rather than guessing asset names/URLs or accepting
+unverified HTML links. Missing/private repositories (401/404), malformed pages,
+missing hashes and other API errors still fail explicitly.
+An explicitly selected numeric tag must match the API response tag. Hostname
+checks are case-insensitive while raw URL path encoding and credential checks
+remain intact.
+
+Metadata reads are bounded to 2 MiB for a release page/API response and 512 KiB
+for its asset fragment. Redirects have a fixed count limit: public-page redirects
+must stay in the same HTTPS GitHub repository's Releases paths; asset downloads
+may redirect only to GitHub's explicit official HTTPS asset hosts. Existing
+archive hash/length checks and safe extraction limits remain in force. The
+fallback uses no token, relay, proxy, authenticated browser session or API quota.
+
 The production path must not accept relay endpoints, access tokens, or arbitrary
 download services. Do not pin it to a single tag such as `2026071001`; that tag
 is only useful as a known-good format sample.

@@ -12,6 +12,8 @@ interface GameStorage {
     fun delete(path: String): Boolean
     fun resolvePatchTarget(targetPath: String): String
     fun rootPath(): String
+    fun listJapaneseResourcePaths(): List<String> = emptyList()
+    fun resourceMigrationRoots(): Map<String, Path> = emptyMap()
     fun deleteResource(relativePath: String): Boolean = false
 }
 

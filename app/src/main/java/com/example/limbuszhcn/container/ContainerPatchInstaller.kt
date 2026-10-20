@@ -7,9 +7,6 @@ import com.example.limbuszhcn.gamefs.PatchUninstallSummary
 import com.example.limbuszhcn.update.InstallGitHubReleaseRequest
 import com.example.limbuszhcn.update.PatchManifest
 import com.example.limbuszhcn.update.TranslationUpdateManager
-import org.json.JSONArray
-import org.json.JSONObject
-import org.json.JSONTokener
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Base64
@@ -113,7 +110,7 @@ class ContainerPatchInstaller(
      *
      * @return 重新编译后的资源统计和索引激活摘要。
      */
-    fun refreshActiveRedirects(): PatchInstallSummary {
+    fun refreshActiveRedirects(auditDirectory: Path? = null): PatchInstallSummary {
         val patchDirectory = latestPatchDirectory()
             ?: throw IllegalStateException("没有可刷新重定向的汉化缓存，请先安装汉化包")
         val manifestFile = patchDirectory.resolve("manifest.json")
@@ -121,7 +118,7 @@ class ContainerPatchInstaller(
             "汉化缓存缺少 manifest.json: $manifestFile"
         }
         val manifest = PatchManifest.fromJson(manifestFile.readText(Charsets.UTF_8))
-        return activateRedirect(patchDirectory, manifest)
+        return activateRedirect(patchDirectory, manifest, auditDirectory)
     }
 
     /**
@@ -131,7 +128,11 @@ class ContainerPatchInstaller(
      * @param manifest 汉化包文件清单和版本信息。
      * @return 候选资源、可读日文源文件和索引激活结果。
      */
-    fun activateRedirect(patchDirectory: Path, manifest: PatchManifest): PatchInstallSummary {
+    fun activateRedirect(
+        patchDirectory: Path,
+        manifest: PatchManifest,
+        auditDirectory: Path? = null
+    ): PatchInstallSummary {
         var activeFiles = 0
         var candidateFiles = 0
         var availableFiles = 0
@@ -166,6 +167,9 @@ class ContainerPatchInstaller(
             candidateSourceFileCount = candidateFiles,
             availableSourceFileCount = availableFiles
         )
+        if (auditDirectory != null) {
+            writeCoverageAudit(patchDirectory, manifest, compiledIndex, auditDirectory)
+        }
         val resourcesReady = hasSufficientJapaneseSources(availableFiles, candidateFiles)
         val previousIndexAvailable = activeIndexPointer().isRegularFile()
         val activated = resourcesReady && compiledIndex.uniqueEntries.isNotEmpty()
@@ -269,104 +273,54 @@ class ContainerPatchInstaller(
         translationJson: String
     ): List<TranslationIndexRecord> {
         return runCatching {
-            val indexRecords = mutableListOf<TranslationIndexRecord>()
-            collectPairedJson(
-                original = JSONTokener(originalJson).nextValue(),
-                translation = JSONTokener(translationJson).nextValue(),
-                path = path,
-                context = "$",
-                output = indexRecords
-            )
-            indexRecords
+            TranslationRecordCollector().collect(path, originalJson, translationJson)
         }.getOrElse {
             android.util.Log.w(TAG, "Skip invalid Japanese translation source path=$path", it)
             emptyList()
         }
     }
 
-    private fun collectPairedJson(
-        original: Any?,
-        translation: Any?,
-        path: String,
-        context: String,
-        output: MutableList<TranslationIndexRecord>
+    private fun writeCoverageAudit(
+        patchDirectory: Path,
+        manifest: PatchManifest,
+        index: CompiledTranslationIndex,
+        directory: Path
     ) {
-        when {
-            original is JSONObject && translation is JSONObject -> {
-                val objectContext = stableObjectIdentity(original)?.let { "$context[$it]" } ?: context
-                val keys = original.keys()
-                while (keys.hasNext()) {
-                    val field = keys.next()
-                    if (!translation.has(field) || translation.isNull(field)) continue
-                    val sourceValue = original.opt(field)
-                    val translatedValue = translation.opt(field)
-                    if (
-                        TranslationTextPolicy.isDisplayField(field) &&
-                        sourceValue is String &&
-                        translatedValue is String
-                    ) {
-                        output += TranslationIndexRecord(
-                            path = path,
-                            id = objectContext,
-                            field = field,
-                            source = sourceValue,
-                            translation = translatedValue
-                        )
-                    } else if (
-                        (sourceValue is JSONObject && translatedValue is JSONObject) ||
-                        (sourceValue is JSONArray && translatedValue is JSONArray)
-                    ) {
-                        collectPairedJson(
-                            original = sourceValue,
-                            translation = translatedValue,
-                            path = path,
-                            context = "$objectContext.$field",
-                            output = output
-                        )
-                    }
+        TranslationCoverageAudit(directory).use { audit ->
+            val visitedSources = mutableSetOf<String>()
+            manifest.entries.forEach { entry ->
+                val translation = patchDirectory.resolve(entry.cachePath).toAbsolutePath().normalize()
+                if (!translation.name.endsWith(".json", ignoreCase = true)) return@forEach
+                val sourcePath = japaneseSourceFor(storage.resolvePatchTarget(entry.targetPath))
+                visitedSources += sourcePath
+                val resource = sourcePath.substringAfter("/Localize/", sourcePath)
+                if (!translation.isRegularFile()) {
+                    audit.file(resource, "missing_patch_file")
+                    return@forEach
                 }
+                val source = storage.read(sourcePath)
+                if (source == null) {
+                    audit.file(resource, "missing_source_file")
+                    return@forEach
+                }
+                runCatching {
+                    audit.file(resource, "paired_resource")
+                    TranslationRecordCollector(audit = true).collect(
+                        resource, source.toString(Charsets.UTF_8), translation.readText(Charsets.UTF_8)
+                    ).forEach { audit.record(it, index) }
+                }.onFailure { audit.file(resource, "invalid_json") }
             }
-            original is JSONArray && translation is JSONArray -> {
-                val translatedByIdentity = linkedMapOf<String, JSONObject>()
-                for (index in 0 until translation.length()) {
-                    val item = translation.optJSONObject(index) ?: continue
-                    stableObjectIdentity(item)?.let { translatedByIdentity[it] = item }
-                }
-                for (index in 0 until original.length()) {
-                    val sourceItem = original.opt(index)
-                    val translatedItem = if (sourceItem is JSONObject) {
-                        stableObjectIdentity(sourceItem)?.let(translatedByIdentity::get)
-                            ?: translation.opt(index)
-                    } else {
-                        translation.opt(index)
-                    }
-                    if (
-                        (sourceItem is JSONObject && translatedItem is JSONObject) ||
-                        (sourceItem is JSONArray && translatedItem is JSONArray)
-                    ) {
-                        collectPairedJson(
-                            original = sourceItem,
-                            translation = translatedItem,
-                            path = path,
-                            context = "$context[$index]",
-                            output = output
-                        )
-                    }
-                }
+            // Manifest-only checks miss entire new resource tables absent from an older patch.
+            storage.listJapaneseResourcePaths().filterNot(visitedSources::contains).forEach { sourcePath ->
+                val resource = sourcePath.substringAfter("/Localize/", sourcePath)
+                audit.file(resource, "unpackaged_source_file")
+                val source = storage.read(sourcePath) ?: return@forEach
+                runCatching {
+                    TranslationRecordCollector(audit = true).collect(resource, source.toString(Charsets.UTF_8), "{}")
+                        .forEach { audit.record(it, index) }
+                }.onFailure { audit.file(resource, "invalid_json") }
             }
         }
-    }
-
-    private fun stableObjectIdentity(value: JSONObject): String? {
-        ALIGNMENT_FIELDS.forEach { field ->
-            if (value.has(field) && !value.isNull(field)) {
-                val identity = value.opt(field)
-                if (identity is String || identity is Number) {
-                    return "$field=${java.lang.String.valueOf(identity)}"
-                }
-            }
-        }
-        return null
     }
 
     private fun saveBaseline(patchDirectory: Path, manifest: PatchManifest) {
@@ -457,7 +411,6 @@ class ContainerPatchInstaller(
         private const val TAG = "LimbusZhCN"
         private const val UPSTREAM_LANG_PREFIX = "LimbusCompany_Data/Lang/LLC_zh-CN/"
         private val LANGUAGE_PREFIX_REGEX = Regex("^(EN|KR|JP)_")
-        private val ALIGNMENT_FIELDS = listOf("id", "level", "index", "idx", "originalId")
     }
 
 }

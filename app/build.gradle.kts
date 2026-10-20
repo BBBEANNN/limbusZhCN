@@ -24,8 +24,8 @@ android {
         minSdk = 26
         targetSdk = 35
         // v1.4 继续以下载汉化包为唯一译名来源，并统一修复中文字体与人格卡布局。
-        versionCode = 5
-        versionName = "1.4"
+        versionCode = 6
+        versionName = "1.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -84,6 +84,7 @@ dependencies {
     implementation(libs.commons.compress)
     implementation(libs.xz)
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20240303")
     testImplementation("com.google.android.gms:play-services-tasks:18.2.0")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

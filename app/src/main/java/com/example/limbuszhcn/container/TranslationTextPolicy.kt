@@ -13,7 +13,9 @@ internal object TranslationTextPolicy {
      * 标识符、模型、语音、图标和颜色等元数据不得加入该集合。
      */
     val DISPLAY_FIELDS: Set<String> = setOf(
-        "content", "dialog", "dlg", "teller",
+        "content", "dialog", "dlg", "teller", "speaker", "displayName", "statText",
+        "goalDescription1", "goalDescription2", "goalDescription3", "goalDescription4",
+        "goalDescription5", "goalDescription6", "goalDescription7", "goalDescription8",
         "name", "nameWithTitle", "nickName", "longName", "specialName",
         "shortName", "abName", "abnormalityName", "panicName", "skinItemTitle",
         "desc", "description", "simpleDesc", "summary", "flavor", "rawDesc", "behaveDesc",

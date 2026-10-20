@@ -4,6 +4,9 @@ import android.os.Bundle
 import android.os.Process
 import android.content.Intent
 import android.util.Log
+import android.net.Uri
+import android.provider.DocumentsContract
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -56,8 +59,10 @@ import com.example.limbuszhcn.container.LocalizeSnapshotExporter
 import com.example.limbuszhcn.container.MicrogContainerConfig
 import com.example.limbuszhcn.container.TranslationRedirectGate
 import com.example.limbuszhcn.gamefs.PatchInstallSummary
+import com.example.limbuszhcn.gamefs.GameResourceTransfer
 import com.example.limbuszhcn.ui.theme.LimbusZhCNTheme
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 汉化器主界面，负责准备容器、从 GitHub Releases 更新汉化并启动容器内游戏。
@@ -127,6 +132,7 @@ class MainActivity : ComponentActivity() {
                 )
             }
             var pendingDiagnosticArchive by remember { mutableStateOf<File?>(null) }
+            var resourceCancellation by remember { mutableStateOf<AtomicBoolean?>(null) }
             val createDiagnosticDocument = rememberLauncherForActivityResult(
                 ActivityResultContracts.CreateDocument("application/zip")
             ) { destination ->
@@ -232,6 +238,71 @@ class MainActivity : ComponentActivity() {
                 return "已同步游戏 v${installed.versionCode}, ${result.importedSplits} 个 split"
             }
 
+            fun runResourceTransfer(uri: Uri, exporting: Boolean) {
+                val cancellation = AtomicBoolean(false)
+                resourceCancellation = cancellation
+                busy = true
+                busyMessage = if (exporting) "正在准备迁出资源" else "正在准备迁入资源"
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                Thread {
+                    val result = runCatching {
+                        if (!exporting) prepareGame()
+                        val status = readContainerStatus()
+                        require(status.gameImported) { "请先同步游戏到容器" }
+                        containerRuntime.stopGameForResourceTransfer()
+                        val transfer = GameResourceTransfer(
+                            storage = containerRuntime.storage(),
+                            stagingRoot = filesDir.toPath().resolve("resource-transfers"),
+                            gameVersion = requireNotNull(status.importedVersionCode) { "游戏版本未知，请先重新同步游戏" },
+                            cancelled = cancellation::get,
+                            progress = { update ->
+                                runOnUiThread {
+                                    busyMessage = if (update.phase == "正在合并资源") {
+                                        "${update.phase}：${update.bytes}/${update.total} 个文件"
+                                    } else {
+                                        "${update.phase}：${update.bytes / (1024 * 1024)} / ${update.total / (1024 * 1024)} MiB"
+                                    }
+                                }
+                            }
+                        )
+                        if (exporting) {
+                            try {
+                                contentResolver.openOutputStream(uri, "w").use { output ->
+                                    transfer.exportResources(requireNotNull(output) { "无法打开所选保存位置" })
+                                }
+                            } catch (error: Throwable) {
+                                runCatching { DocumentsContract.deleteDocument(contentResolver, uri) }
+                                throw error
+                            }
+                        } else {
+                            contentResolver.openInputStream(uri).use { input ->
+                                transfer.importResources(requireNotNull(input) { "无法打开所选迁移包" })
+                            }
+                        }
+                    }
+                    runOnUiThread {
+                        resourceCancellation = null
+                        busy = false
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        message = result.fold(
+                            onSuccess = { summary ->
+                                if (exporting) "已迁出 ${summary.files} 个资源文件，可在卸载或换机后迁入" else
+                                    "已迁入 ${summary.files} 个资源文件，保留 ${summary.keptExisting} 个已有文件；启动游戏后校验资源并补齐版本差异"
+                            },
+                            onFailure = { error -> error.userMessage() }
+                        )
+                        containerStatus = readContainerStatus()
+                    }
+                }.start()
+            }
+
+            val createResourceDocument = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+                if (uri != null) runResourceTransfer(uri, exporting = true)
+            }
+            val openResourceDocument = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                if (uri != null) runResourceTransfer(uri, exporting = false)
+            }
+
             fun refreshContainerStatus() {
                 containerStatus = readContainerStatus()
                 message = containerStatus.message
@@ -272,6 +343,14 @@ class MainActivity : ComponentActivity() {
                     busy = busy,
                     busyMessage = busyMessage,
                     message = message,
+                    onExportResources = {
+                        val stamp = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
+                        createResourceDocument.launch("LimbusResources-$stamp.zip")
+                    },
+                    onImportResources = { openResourceDocument.launch(arrayOf("application/zip", "application/octet-stream")) },
+                    onCancelTask = resourceCancellation?.let { flag ->
+                        { flag.set(true); busyMessage = "正在取消资源迁移" }
+                    },
                     onGithubReleaseUrlChange = { githubReleaseUrl = it },
                     onSaveConfig = ::saveUpdateConfig,
                     onContainerRefresh = ::refreshContainerStatus,
@@ -406,6 +485,7 @@ class MainActivity : ComponentActivity() {
         private const val EXTRA_SYNC_INSTALLED_GAME = "sync_installed_game"
         private const val EXTRA_EXPORT_LOCALIZE_SNAPSHOT = "export_localize_snapshot"
         private const val EXTRA_REFRESH_TRANSLATION_REDIRECTS = "refresh_translation_redirects"
+        private const val EXTRA_AUDIT_TRANSLATION_INDEX = "audit_translation_index"
         private const val EXTRA_ENABLE_TRANSLATION_REDIRECTS = "enable_translation_redirects"
         private const val EXTRA_MICROG_APK_PATHS = "microg_apk_paths"
         private const val EXTRA_MICROG_APK_URLS = "microg_apk_urls"
@@ -451,11 +531,15 @@ class MainActivity : ComponentActivity() {
                             "summary=${result.summaryFile.absolutePath} json=${result.jsonFileCount} bytes=${result.totalBytes}"
                     )
                 }
-                if (intent.getBooleanExtra(EXTRA_REFRESH_TRANSLATION_REDIRECTS, false)) {
+                if (intent.getBooleanExtra(EXTRA_REFRESH_TRANSLATION_REDIRECTS, false) ||
+                    intent.getBooleanExtra(EXTRA_AUDIT_TRANSLATION_INDEX, false)) {
+                    val auditDirectory = if (intent.getBooleanExtra(EXTRA_AUDIT_TRANSLATION_INDEX, false)) {
+                        File(requireNotNull(getExternalFilesDir(null)), "diagnostics/translation-coverage").toPath()
+                    } else null
                     val summary = ContainerPatchInstaller(
                         cacheRoot = filesDir.toPath().resolve("translation-cache"),
                         storage = containerRuntime.storage()
-                    ).refreshActiveRedirects()
+                    ).refreshActiveRedirects(auditDirectory)
                     Log.i(TAG, "Debug intent refreshed translation redirects version=${summary.version} files=${summary.writtenFiles}")
                 }
                 if (intent.getBooleanExtra(EXTRA_LAUNCH_CONTAINER_GAME, false)) {
@@ -519,6 +603,7 @@ class MainActivity : ComponentActivity() {
 
 private fun Intent.hasDebugContainerAction(): Boolean =
     getBooleanExtra("launch_container_game", false) ||
+        getBooleanExtra("audit_translation_index", false) ||
         getBooleanExtra("sync_installed_game", false) ||
         getBooleanExtra("export_localize_snapshot", false) ||
         getBooleanExtra("refresh_translation_redirects", false) ||
@@ -577,7 +662,10 @@ private fun LimbusApp(
     onLaunchTranslatedGame: () -> Unit,
     onUpdateTranslation: () -> Unit,
     onRestoreTranslation: () -> Unit,
-    onExportDebugLogs: () -> Unit
+    onExportDebugLogs: () -> Unit,
+    onExportResources: () -> Unit = {},
+    onImportResources: () -> Unit = {},
+    onCancelTask: (() -> Unit)? = null
 ) {
     var advancedExpanded by remember { mutableStateOf(false) }
     Scaffold(
@@ -613,7 +701,7 @@ private fun LimbusApp(
         }
     ) { innerPadding ->
         if (busy) {
-            BusyDialog(message = busyMessage)
+            BusyDialog(message = busyMessage, onCancel = onCancelTask)
         }
         Column(
             modifier = Modifier
@@ -714,6 +802,16 @@ private fun LimbusApp(
                         "诊断包包含滚动日志、机型兼容信息和异常退出原因；会自动脱敏，不包含游戏资源、存档或更新地址配置。",
                         style = MaterialTheme.typography.bodySmall
                     )
+                    HorizontalDivider()
+                    Text("资源迁移", style = MaterialTheme.typography.titleMedium)
+                    Text("迁移前会关闭容器内游戏。资源包保留已下载资源，不包含登录态和账号配置。迁入时保留已有文件，版本不同可能需要补充下载。",
+                        style = MaterialTheme.typography.bodySmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(onClick = onExportResources, enabled = containerStatus.gameImported && !busy,
+                            modifier = Modifier.weight(1f)) { Text("迁出资源") }
+                        OutlinedButton(onClick = onImportResources, enabled = !busy,
+                            modifier = Modifier.weight(1f)) { Text("迁入资源") }
+                    }
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -754,10 +852,10 @@ private fun CompatibilityCard(
 }
 
 @Composable
-private fun BusyDialog(message: String) {
+private fun BusyDialog(message: String, onCancel: (() -> Unit)? = null) {
     AlertDialog(
         onDismissRequest = {},
-        confirmButton = {},
+        confirmButton = { if (onCancel != null) TextButton(onClick = onCancel) { Text("取消迁移") } },
         title = { Text("请稍候") },
         text = {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {

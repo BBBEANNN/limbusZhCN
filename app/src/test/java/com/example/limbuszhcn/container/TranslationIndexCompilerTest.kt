@@ -13,6 +13,18 @@ import kotlin.io.path.readText
 
 class TranslationIndexCompilerTest {
     @Test
+    fun keepsPunctuationTranslationsExactWithoutRewritingCodesAsEmbeddedTerms() {
+        val compiler = TranslationIndexCompiler().apply {
+            add(record("UI.json", "question", "content", "??", "？？"))
+            add(record("UI.json", "ellipsis", "content", "...。", "…"))
+        }
+        val compiled = compiler.compile("test", "archive")
+        assertEquals("？？", compiled.uniqueEntries["??"])
+        assertEquals("…", compiled.uniqueEntries["...。"])
+        assertTrue(compiled.termEntries.isEmpty())
+    }
+
+    @Test
     fun keepsOnlyUnambiguousSourceMappingsInFastIndex() {
         val compiler = TranslationIndexCompiler()
         compiler.add(record("MainUIText.json", "1", "content", "Sinner", "罪人"))
@@ -160,6 +172,30 @@ class TranslationIndexCompilerTest {
         assertEquals("重试", compiled.uniqueEntries["リトライ"])
     }
 
+    /** 同字词典记录仍有语义：不能把技能“保存”替换为地牢 UI 的“检查点”。 */
+    @Test
+    fun protectsUnchangedGlossaryTermsFromUiHomographs() {
+        val compiler = TranslationIndexCompiler().apply {
+            repeat(4) { index ->
+                add(record("jp/JP_StoryDungeonUI.json", "save-$index", "content", "保存", "检查点"))
+            }
+            add(record("jp/JP_Bufs-a1c10p1.json", "ChargeNoir", "name", "保存", "保存"))
+            add(record("jp/JP_BattleKeywords.json", "ChargeNoirAlly", "name", "保存", "保存"))
+            add(record("jp/JP_Bufs.json", "field", "name", "保存神域", "保存神域"))
+            add(record("jp/JP_OtherUIText.json", "field", "content", "保存神域", "检查点神域"))
+            add(record("jp/JP_Bufs.json", "long-field", "name", "保存神域 全体効果", "保存神域 全体効果"))
+            add(record("jp/JP_OtherUIText.json", "long-field", "content", "保存神域 全体効果", "检查点神域"))
+        }
+
+        val compiled = compiler.compile("2026102001", "archive")
+
+        assertEquals("保存", compiled.uniqueEntries["保存"])
+        assertEquals("保存", compiled.termEntries["保存"])
+        assertEquals("保存神域", compiled.uniqueEntries["保存神域"])
+        assertEquals("保存神域", compiled.termEntries["保存神域"])
+        assertEquals("保存神域 全体効果", compiled.uniqueEntries["保存神域 全体効果"])
+    }
+
     /** 验证 2:1 多数派在放宽阈值后直接采纳，1:1 与 2:2 平票仍被丢弃。 */
     @Test
     fun adoptsTwoThirdsMajorityTranslations() {
@@ -195,11 +231,11 @@ class TranslationIndexCompilerTest {
         val indexFile = TranslationIndexStore(root).activate(compiled)
 
         assertTrue(indexFile.exists())
-        assertTrue(indexFile.parent.fileName.toString().contains("-s9-"))
+        assertTrue(indexFile.parent.fileName.toString().contains("-s10-"))
         assertEquals(indexFile.toString().replace('\\', '/'), root.resolve("active-index.path").readText().trim())
         DataInputStream(indexFile.inputStream()).use { input ->
             assertEquals("LZTI1\u0000", String(input.readNBytes(6), Charsets.US_ASCII))
-            assertEquals(9, input.readInt())
+            assertEquals(10, input.readInt())
             assertEquals(1, input.readInt())
             assertEquals(1, input.readInt())
             assertEquals("Sinner", input.readSizedUtf8())

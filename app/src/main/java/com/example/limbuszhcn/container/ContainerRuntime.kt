@@ -28,6 +28,9 @@ interface ContainerRuntime {
      */
     fun storage(): GameStorage
 
+    /** 资源迁移前停止容器内游戏，保持迁出快照与迁入文件的一致性。 */
+    fun stopGameForResourceTransfer() {}
+
     /**
      * 通过容器启动已导入的游戏。
      */

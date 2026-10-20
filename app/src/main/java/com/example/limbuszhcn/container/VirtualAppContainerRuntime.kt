@@ -8,6 +8,7 @@ import android.os.Build
 import android.util.Log
 import java.io.File
 import java.util.zip.ZipFile
+import com.example.limbuszhcn.gamefs.GameResourceTransfer
 
 /**
  * 使用 VirtualApp 承载官方 Limbus Company，并将容器能力接入汉化器业务层。
@@ -85,7 +86,10 @@ class VirtualAppContainerRuntime(
      */
     override fun storage() =
         if (bridge.available) {
-            ContainerWorkspaceStorage(bridge.localizeRoot(LocalContainerRuntime.GAME_PACKAGE).toPath())
+            ContainerWorkspaceStorage(
+                bridge.localizeRoot(LocalContainerRuntime.GAME_PACKAGE).toPath(),
+                bridge.resourceMigrationRoots(LocalContainerRuntime.GAME_PACKAGE)
+            )
         } else {
             fallback.storage()
         }
@@ -94,6 +98,10 @@ class VirtualAppContainerRuntime(
      * 准备容器存储和 Google 服务后，通过 VirtualApp 入口启动游戏。
      */
     override fun launchGame() {
+        GameResourceTransfer(
+            storage(), context.filesDir.toPath().resolve("resource-transfers"),
+            status().importedVersionCode ?: 1L
+        ).recoverInterruptedImports()
         Log.i(TAG, "launchGame requested pid=${Process.myPid()}")
         bridge.requireAvailable()
         // Redirects must not survive into the next resource-validation pass.
@@ -105,6 +113,10 @@ class VirtualAppContainerRuntime(
         bridge.ensureGameLocalizeRoot(LocalContainerRuntime.GAME_PACKAGE)
         bridge.logGameLocalizeDiagnostics(LocalContainerRuntime.GAME_PACKAGE)
         bridge.launch(LocalContainerRuntime.GAME_PACKAGE)
+    }
+
+    override fun stopGameForResourceTransfer() {
+        bridge.stopGameForResourceTransfer(LocalContainerRuntime.GAME_PACKAGE)
     }
 
     private fun ensureGameInstalledInVirtualApp() {
@@ -292,6 +304,38 @@ private class VirtualAppReflectionBridge(
             .getMethod("getExternalStorageAppDataDir", Int::class.javaPrimitiveType, String::class.java)
             .invoke(null, 0, packageName) as File
         return appData.resolve("files/Assets/Resources_moved/Localize")
+    }
+
+    fun resourceMigrationRoots(packageName: String): Map<String, java.nio.file.Path> {
+        val assets = localizeRoot(packageName).parentFile!!.parentFile!!
+        val files = assets.parentFile!!
+        val external = files.parentFile!!
+        val environment = Class.forName("com.lody.virtual.os.VEnvironment")
+        val internal = environment.getMethod(
+            "getDataUserPackageDirectory", Int::class.javaPrimitiveType, String::class.java
+        ).invoke(null, 0, packageName) as File
+        return mapOf(
+            "assets" to assets.toPath(),
+            "external-unity-cache" to external.resolve("cache/UnityCache/Shared").toPath(),
+            "external-files-unity-cache" to files.resolve("UnityCache/Shared").toPath(),
+            "internal-unity-cache" to internal.resolve("cache/UnityCache/Shared").toPath(),
+            "internal-files-unity-cache" to internal.resolve("files/UnityCache/Shared").toPath()
+        )
+    }
+
+    fun stopGameForResourceTransfer(packageName: String) {
+        requireAvailable()
+        val manager = Class.forName("com.lody.virtual.client.ipc.VActivityManager")
+        val instance = manager.getMethod("get").invoke(null)
+        manager.getMethod("killAppByPkg", String::class.java, Int::class.javaPrimitiveType)
+            .invoke(instance, packageName, 0)
+        val running = manager.getMethod("isAppRunning", String::class.java,
+            Int::class.javaPrimitiveType, Boolean::class.javaPrimitiveType)
+        repeat(40) {
+            if (running.invoke(instance, packageName, 0, false) != true) return
+            Thread.sleep(200)
+        }
+        error("游戏尚未完全退出，请退出游戏后重试资源迁移")
     }
 
     fun ensureGameLocalizeRoot(packageName: String) {

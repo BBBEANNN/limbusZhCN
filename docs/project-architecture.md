@@ -199,6 +199,68 @@ Because translated files can live outside the game's visible resource tree,
 
 ## Runtime Translation Index
 
+### Text layout boundary
+
+Translated controls retain their configured font-size baseline. For TMP controls
+that originally enable automatic sizing, `fontSizeMax` is the baseline rather
+than a `fontSize` value already reduced by a previous layout. Text length alone
+must not force a description into one line or apply arbitrary size multipliers.
+Literal newlines and TMP `<br>` tags are explicit breaks; translation preserves
+them, and explicit `line-height` markup must not receive extra spacing.
+Compact labels may fit their original rectangle, while body text retains the
+component's wrapping policy. Font, material and layout restoration on component
+reuse remain part of the runtime boundary.
+
+The generated Chinese TMP SDF material uses a small, opaque black outline
+(`_OutlineWidth=0.12`, `OUTLINE_ON`) so highlighted text remains legible on light
+panels. It retains the Chinese atlas and shader; Japanese material parameters
+are not copied onto that atlas. The component's original material is restored
+when translated text is released.
+
+Canonical glossary names also participate when Japanese and Chinese are identical.
+These entries protect already-correct terms from lower-priority UI homographs,
+and longest-match term lookup must retain their identity spans. For example, a
+glossary's unchanged `保存` must not inherit the dungeon checkpoint translation
+of the same source string. Only the downloaded glossary supplies this policy;
+the application does not maintain a built-in replacement list.
+Embedded terms must contain a letter. Punctuation-only pairs such as `?? -> ？？`
+remain eligible for exact sentence lookup but cannot rewrite pieces of displayed
+codes such as `??-??-??-01`.
+
+Array entries with `id`, `level`, `index`, `idx`, `originalId` or RPG item `key` are paired by
+that identity inside the same resource and parent array. A missing or duplicate
+translated identity cannot fall back to another entry's position. Repeated story
+IDs (including `-1`) are paired by occurrence within the same ID group only when
+the source and translation group sizes agree. Arrays without
+identities retain structural pairing, including string arrays under reviewed
+display fields.
+
+The debug-only `audit_translation_index` intent recompiles the cached package and
+writes a bounded coverage report to the app's external diagnostics directory.
+`records.tsv` identifies each reviewed field by resource, context, field, source
+and translation hashes, and coverage status; `summary.properties` records totals
+and any omitted rows. Missing resources, missing translations, unreviewed fields,
+invalid text, source conflicts and canonical overrides are reported separately.
+The report contains no text bodies, PlayerPrefs or account configuration and is
+limited to 32 MiB plus its summary. Production launch does not generate reports.
+The reviewed RPG display policy includes `speaker`, `displayName`, `statText`
+and `goalDescription1` through `goalDescription8`. Their identifiers (`key`,
+`index`) remain metadata used only for pairing.
+
+### Resource migration
+
+Advanced settings provide user-selected resource export/import through Android's
+document picker. `GameStorage` supplies an explicit set of container-owned Assets
+and completed UnityCache/Shared roots; UI code never constructs Android/data paths.
+Archives contain a format/game-version header, logical relative paths and per-file
+SHA-256 checksums. APKs, native code, temporary downloads, PlayerPrefs and account
+configuration are excluded. Migration stops the virtual game, streams with bounded
+buffers, exposes progress/cancellation and enforces file/count/total-size limits.
+Import stages and verifies the complete archive before adding resources, preserves
+all existing files, and journals new files for rollback/recovery before game launch.
+An application with a different signing certificate cannot retrofit this exporter
+into an older installation; exporting must occur before that installation is removed.
+
 The file redirect experiment proved that enabling redirects after login is too
 late: the official localization tables have already been loaded into the game.
 The replacement data path is therefore a versioned, host-private text index.
@@ -209,20 +271,20 @@ recursively pairs the translated JSON with the container-visible official Japane
 JSON. Stable `id` values are preferred for array alignment, while matching nested
 arrays such as skill levels and coin descriptions are traversed structurally. Only
 explicitly whitelisted display fields enter the runtime index. Ambiguous source
-strings are counted and excluded from the context-free fallback. Schema 8 also
+strings are counted and excluded from the context-free fallback. Schema 10 also
 stores a curated short-term table for longest-match replacement inside formatted
-or rich text. Dominant conflicts are accepted only with at least three samples,
-80% support and a 3x lead over the runner-up. Paired square brackets and TMP rich
+or rich text. Dominant conflicts require at least two samples, two-thirds support
+and a 2x lead over the runner-up; canonical Buff/battle-keyword names take priority.
+Paired square brackets and TMP rich
 text tags are removed when deriving terms, so sources such as `[攻撃前]` and
 `<color><s>長姉</s></color>` also cover their embedded runtime forms.
 Runtime longest-match replacement copies complete `<...>` TMP tags without
-inspection and requires word boundaries around ASCII-only terms. Schema 8 keeps
-expanding package terms such as `以上 -> 或以上`, while the native matcher detects
-whether a source occurrence is already inside the complete translated value. This
-makes repeated `SkillPerLevel -> Skill -> TMP` passes idempotent without discarding
-verified translations from the downloaded package.
+inspection and requires word boundaries around ASCII-only terms. Expanding terms
+whose translations still contain the source, such as `以上 -> 或以上`, are excluded
+from embedded matching so repeated `SkillPerLevel -> Skill -> TMP` passes remain
+idempotent. Canonical identity terms remain eligible and protect entire spans.
 The compiler and native object-graph traversal use the same explicit display-field
-policy. In addition to the original skill/UI fields, schema 8 includes verified
+policy. In addition to the original skill/UI fields, schema 10 includes verified
 display values such as `story`, `relatedChapterText`, and `openConditionNumber`.
 Translations containing Unicode replacement characters or illegal control bytes
 are omitted so a damaged package entry leaves the official Japanese text intact.
@@ -366,10 +428,9 @@ the raw IL2CPP object address alone. Limbus can copy a returned string into a ne
 managed object before assigning it to TMP, and address-only tagging then loses the evidence needed
 to select the uniform Chinese primary face. Exact content tracking survives that
 copy while still avoiding a blanket font replacement for native Japanese text.
-Known, reviewed upstream terminology errors are normalized while the index is
-compiled, and a very small built-in term table covers reviewed Japanese condition
-fragments that otherwise degrade into half-Japanese output after shorter terms are
-substituted.
+Effective terminology comes from the downloaded package. The compiler does not
+carry a built-in correction list; source conflicts and missing package entries
+remain visible in the coverage audit rather than receiving guessed translations.
 
 ## Notes
 

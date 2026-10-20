@@ -9,11 +9,39 @@
 
 方案级变更先更新本文件或对应 docs, 再改代码。
 
+## 架构概览与关键模块
+
+Android Kotlin/Compose 宿主通过 VirtualApp 运行 Google Play 原装游戏。公开汉化包与
+容器日文资源在宿主内结构化配对、编译索引，native IL2CPP 层负责文本取得与最终显示。
+
+- `app/src/main/java/com/example/limbuszhcn/MainActivity.kt`：启动、设置、文件选择与进度。
+- `app/.../container/`：容器适配、资源配对、索引编译、激活与覆盖审计。
+- `app/.../gamefs/`：`GameStorage` 存储边界、资源迁入迁出与中断恢复。
+- `third_party/virtualapp-upstream/lib/`：容器服务与 native IO/IL2CPP/TMP 接管。
+- `scripts/`：native 回归及离线逐字段审计；`app/src/test/`：宿主单元测试。
+
+```mermaid
+flowchart LR
+    UI[Compose 界面] --> Runtime[ContainerRuntime]
+    Runtime --> VA[VirtualApp 原装游戏]
+    Runtime --> Storage[GameStorage]
+    Release[GitHub Releases] --> Installer[ContainerPatchInstaller]
+    Storage --> Collector[TranslationRecordCollector]
+    Installer --> Collector
+    Collector --> Compiler[TranslationIndexCompiler]
+    Compiler --> Index[宿主私有 schema 10 索引]
+    Index --> Native[IL2CPP 文本与 TMP 接管]
+    Native --> VA
+    UI --> Transfer[GameResourceTransfer]
+    Transfer --> Storage
+    Transfer --> SAF[用户选择的资源 ZIP]
+```
+
 ## 项目边界
 
 - 目标游戏包名: `com.ProjectMoon.LimbusCompany`
 - 汉化器包名: `com.example.limbuszhcn`
-- 主路径: VirtualApp 容器模式。同步 Google Play 已安装游戏 split APK 到容器, 从容器内启动游戏, 再写容器内 `Localize/en/`。
+- 主路径: VirtualApp 容器模式。同步 Google Play 已安装游戏 split APK 到容器，编译容器日文单源索引后从容器内启动；文件覆盖仅作为内部旧路径。
 - 禁止修改游戏 APK, 禁止 Frida 注入, 禁止 Shizuku 生产路径。
 - App 模块: `:app`; 容器模块: `:virtualapp` -> `third_party/virtualapp-upstream/lib`。
 - UI 不直接访问真实 `Android/data`; 安装、卸载、复原必须走 `GameStorage`。
@@ -49,14 +77,11 @@
   该包装器须独立通过原始 `sigaction` 维护,不得扩展已被 inline hook 的 `sigaction` 函数体,
   否则会改变前导指令布局并导致 Android 12 在 `__fix_instructions` 崩溃。
 
-## 当前调试状态
+## 运行时与文本接管约定
 
 - 设备地址最近变动频繁; 以用户最新给出的 adb 地址为准。
 - 用户已明确说明: 不要给测试机设置代理。可观察 VPN/网络状态, 不要修改。
-- Redmi/Android 12 + Limbus v1.107.1 已验证容器可进入标题页。
-- 历史黑屏根因: arm64 `getcwd` hook 返回 raw syscall 长度 `2`, 导致 il2cpp 执行 `strlen(0x2)`。
-- 最近新增 Firebase C++ Auth shim 后, 容器已从黑屏推进到 `PlayVideo -> PlayWarningAnim -> PlayDone` 并显示标题页。
-- Google 登录选择器可打开; 选择账号后仍需继续跟踪 Credentials result 回调和 Unity 登录状态。
+- 标题页就绪须观察 `PlayVideo -> PlayWarningAnim -> PlayDone`，Google 登录须继续验证选择账号后的 result 与 Unity 登录状态；不能只以选择器打开判定成功。
 - vivo/Android 13 的 Issue #1 已确认 Google 登录会启动 `:p1/:p2` microG 辅助进程,随后在 `libv++_64.so -> hookAndroidVM -> NativeEngine.launchEngine` 同步崩溃；Apple 登录同时缺失浏览器 `genericidp` 回调入口。修复后仍须在真机确认账号选择结果和 Apple OAuth 状态确实返回 p0 游戏进程。
 - 游戏文本文件在进入主页面登录后才下载, 不要在标题页阶段期待 `Localize/en/` 已完整存在。
 - Redmi/Android 12 + Limbus v1.109.1 已验证同步到容器 versionCode 450 后可再次走完
@@ -69,11 +94,10 @@
   `Rewrite Limbus GMS GetServiceRequest`,随后仍可进入 `PlayDone`。其中
   `libcovault-appsec.so +0x4e564` 的 `SIGILL` 被放行后游戏继续运行,不得把它单独作为
   GMS broker 修复失败的判据。Android 13/MIUI 设备仍需用相同四条日志复测。
-- 运行时文本索引已切换为日语单源 schema 7。schema 6 的版本 2026071001 曾生成
-  93488 条完整映射、19659 条幂等短术语映射和 151950 条源记录;schema 7 在此基础上
-  统一编译端/native 显示字段、覆盖 `story/relatedChapterText/openConditionNumber`,并拒绝
-  Unicode 替换字符、非法控制字符等确定损坏的译文。Limbus 1.109.1 可解析 149 个 IL2CPP
-  assembly。接管必须在访客配置阶段挂接 `dlsym`,只把 Unity 请求的 `il2cpp_init`
+- 运行时文本索引为日语单源 schema 10，编译端/native 必须版本一致并同步显示字段。
+  除 `story/relatedChapterText/openConditionNumber` 外，还覆盖经审查的 `speaker`、
+  `displayName`、`statText`、`goalDescription1..8`；拒绝 Unicode 替换字符和非法控制字符。
+  接管必须在访客配置阶段挂接 `dlsym`,只把 Unity 请求的 `il2cpp_init`
   返回值替换为生命周期包装函数;原初始化返回后才解析 domain 和安装文本 hook。不得
   inline patch `il2cpp_init`,不得并发读取半初始化 domain,也不得用固定启动秒数补偿。
 - `TMP_Text.set_text`、`SetText(String)`、`SetText(String, Boolean)` 与安全的
@@ -83,7 +107,10 @@
   组件复用于非托管文本时必须恢复原主字体,不得按“含非 ASCII”泛化替换所有 TMP。
   内置主字体使用 Sarasa Gothic SC Regular,动态 SDF 图集必须使用 4096x4096,1024x1024
   已实测会在技能页加载约千条文本后丢失旧字形。切换中文字体时须保存并恢复组件原字体
-  与材质,并把原 TMP 材质的黑色描边继承到中文材质;已汉化的普通多行文本须做有限行距
+  与材质；中文 SDF 统一使用 `_OutlineWidth=0.12`、不透明黑边和 `OUTLINE_ON`，不得复制
+  日文材质的图集或膨胀参数。原组件启用自动字号时，以 `fontSizeMax` 保存配置基准，
+  不得把已缩小的渲染字号当成基准；不得按字符数粗略缩字或把长文本强制改成单行。
+  保留原文换行与 `<br>`。已汉化的普通多行文本须做有限行距
   补偿,带显式 `line-height` 的文本不得重复补偿。字体创建或 fallback 注册失败时必须
   保持原文,不得输出方框文本。
 - 当前生产文本接管目标为 OurPlay 风格的日语全量模式:只编译设备上的日文
@@ -97,11 +124,17 @@
   Getter 在 arm64 上仅相隔 4--8 字节,仍由 TMP/UI 精确匹配兜底,不得批量 inline hook。
 - `TextData_SkillPerLevel.GetDesc` 调用原 formatter 前必须用 IL2CPP 反射递归处理
   `levelList -> coinlist -> coindescs`;列表元素通过 `get_Count/get_Item` 调用取得,
-  不得硬编码托管 `List<T>` 或数组布局。当前 schema 7 同时存储完整原文索引与
+  不得硬编码托管 `List<T>` 或数组布局。索引同时存储完整原文索引与
   短术语 trie,允许从方括号及 TMP 富文本标签中提取 `攻撃前`、`長姉` 等嵌入术语。
   运行时最长匹配必须原样跳过 `<...>` 富文本标签,纯 ASCII 术语必须满足单词边界;
   编译和运行时还必须排除“译文仍包含原文”的非幂等术语,例如 `以上 -> 或以上`,否则
   同一文本经过 `SkillPerLevel -> Skill -> TMP` 多层接管时会不断前插“或”。
+- Buff/战斗关键词词典中原译文相同的条目也须保留，防止 `保存` 被其它页面的同文译名
+  `检查点` 覆盖；最长术语匹配必须保护完整的同文跨度。纯标点只能参与整句匹配。
+- 数组只在同一资源、同一父数组内按 `id/level/index/idx/originalId/key` 对应，不得因 ID
+  缺失而借用另一条记录的位置。重复 ID 仅在两侧数量相等时按本组出现次序对应。
+- debug 的 `audit_translation_index` 只输出路径、上下文、字段、哈希与覆盖状态，报告
+  上限 32 MiB 并标记截断；不输出正文、不自动并入用户诊断包。源缺项与歧义必须显式报告。
 - formatter 可能在进入 TMP setter 前已经把日文替换成中文。TMP setter 对任何非 ASCII
   文本都必须先准备全局 fallback,不能只用“setter 中字符串指针是否变化”判断是否创建
   字体,否则首个已预翻译页面会缺失日文字体不包含的简体字。
@@ -132,6 +165,12 @@
   `microg_apk_paths` 调试参数或首次启动联网下载。旧设备已有的有效外部配置可继续
   使用,调试入口仍只允许 debug 构建覆盖。超过 Git 托管单文件限制的内置 APK 必须
   拆为清单声明的资源分片,运行时按顺序合并后再对完整 APK 做 SHA-256 和签名校验。
+- 高级设置的资源迁移通过 `GameStorage.resourceMigrationRoots()` 获取容器 Assets 与
+  已完成的 UnityCache/Shared 白名单。迁移前停止游戏；通过系统文件选择器流式读写资源
+  ZIP，包含版本与逐文件 SHA-256。禁止导出 APK、代码、PlayerPrefs、账号或临时下载。
+  迁入须先在宿主持久目录暂存并完整校验，保留所有已有文件，新增文件写入前同步回滚
+  日志；取消、失败或下次启动时恢复中断操作。需要额外容纳整份迁入资源的可用空间。
+  不同签名不能覆盖旧安装，也不能让旧安装凭空具备迁出功能。
 
 ## 常用命令
 
@@ -162,7 +201,11 @@ $env:JAVA_TOOL_OPTIONS=''
 adb -s <device> install -r .\app\build\outputs\apk\debug\app-debug.apk
 adb -s <device> shell am start -n com.example.limbuszhcn/.MainActivity --ez launch_container_game true
 adb -s <device> shell am start -n com.example.limbuszhcn/.MainActivity --ez sync_installed_game true --ez launch_container_game true
+python scripts/test_native_translation.py --device <device> --adb <adb-path>
 ```
+
+native 回归需先设置 `ANDROID_NDK_HOME`；完整资源与字段审计复现见
+`docs/translation-font-verification-20261020.md`。独立 native 回归不替代游戏内视觉验收。
 
 关键观察:
 

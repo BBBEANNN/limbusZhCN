@@ -80,7 +80,7 @@ internal class TranslationIndexCompiler {
             !TranslationTextPolicy.isDisplayField(record.field) ||
             record.source.isBlank() ||
             record.translation.isBlank() ||
-            record.source == record.translation ||
+            (record.source == record.translation && !isCanonicalTerm(record)) ||
             !TranslationTextPolicy.isUsableDisplayText(record.source) ||
             !TranslationTextPolicy.isUsableDisplayText(record.translation)
         ) {
@@ -97,7 +97,7 @@ internal class TranslationIndexCompiler {
      * @param archiveSha256 汉化归档 SHA-256。
      * @param candidateSourceFileCount 候选译文 JSON 数量。
      * @param availableSourceFileCount 已找到官方日文对应文件的数量。
-     * @return 可写入 schema 8 二进制文件的不可变索引。
+     * @return 可写入当前版本二进制文件的不可变索引。
      */
     fun compile(
         version: String,
@@ -120,7 +120,9 @@ internal class TranslationIndexCompiler {
         var conflicts = 0
         var dominantEntries = 0
         bySource.toSortedMap().forEach { (source, occurrences) ->
-            val translations = occurrences.groupingBy(TranslationIndexRecord::translation).eachCount()
+            val authoritative = occurrences.filter(::isCanonicalTerm)
+            val candidates = authoritative.ifEmpty { occurrences }
+            val translations = candidates.groupingBy(TranslationIndexRecord::translation).eachCount()
             val resolved = resolveTranslation(translations)
             if (resolved != null) {
                 unique[source] = resolved
@@ -133,9 +135,10 @@ internal class TranslationIndexCompiler {
         sorted.forEach { record ->
             val priority = termSourcePriority(record.path)
             if (TranslationTextPolicy.isTermField(record.field)) {
-                normalizedTerms(record.source, record.translation).forEach { (source, translation) ->
-                    termCandidates += TermCandidate(source, translation, priority)
-                }
+                normalizedTerms(record.source, record.translation, isCanonicalTerm(record))
+                    .forEach { (source, translation) ->
+                        termCandidates += TermCandidate(source, translation, priority)
+                    }
             }
             if (TranslationTextPolicy.isStructuredDescriptionField(record.field)) {
                 normalizedLeadingClauseTerms(record.source, record.translation)
@@ -210,12 +213,21 @@ internal class TranslationIndexCompiler {
         }
     }
 
-    private fun normalizedTerms(source: String, translation: String): Set<Pair<String, String>> {
+    private fun isCanonicalTerm(record: TranslationIndexRecord): Boolean =
+        TranslationTextPolicy.isTermField(record.field) &&
+            termSourcePriority(record.path) == CANONICAL_GLOSSARY_PRIORITY
+
+    private fun normalizedTerms(
+        source: String,
+        translation: String,
+        allowIdentity: Boolean
+    ): Set<Pair<String, String>> {
         return buildSet {
-            candidateTerm(source, translation)?.let(::add)
+            candidateTerm(source, translation, allowIdentity)?.let(::add)
             candidateTerm(
                 RICH_TEXT_TAG.replace(source, ""),
-                RICH_TEXT_TAG.replace(translation, "")
+                RICH_TEXT_TAG.replace(translation, ""),
+                allowIdentity
             )?.let(::add)
             val sourceBracketTerms = SQUARE_BRACKET_CONTENT.findAll(source)
                 .map { match -> match.groupValues[1] }
@@ -227,7 +239,7 @@ internal class TranslationIndexCompiler {
                 // 游戏格式化器可能只输出方括号内部的可见名称。同步派生内部术语，
                 // 让所有同类标签在格式化后仍能二次汉化，而不是只修某个页面或角色。
                 sourceBracketTerms.zip(translationBracketTerms).forEach { (sourceTerm, translationTerm) ->
-                    candidateTerm(sourceTerm, translationTerm)?.let(::add)
+                    candidateTerm(sourceTerm, translationTerm, allowIdentity)?.let(::add)
                 }
             }
         }
@@ -255,14 +267,16 @@ internal class TranslationIndexCompiler {
 
     private fun candidateTerm(
         sourceValue: String,
-        translationValue: String
+        translationValue: String,
+        allowIdentity: Boolean = false
     ): Pair<String, String>? {
         val normalizedSource = sourceValue.trim().stripPairedBrackets()
         val normalizedTranslation = translationValue.trim().stripPairedBrackets()
         return (normalizedSource to normalizedTranslation).takeIf {
             normalizedSource.isTermLike(minimumCodePoints = 2) &&
+                normalizedSource.any(Char::isLetter) &&
                 normalizedTranslation.isTermLike(minimumCodePoints = 1) &&
-                normalizedSource != normalizedTranslation
+                (allowIdentity || normalizedSource != normalizedTranslation)
         }
     }
 
@@ -411,9 +425,9 @@ internal class TranslationIndexStore(private val root: Path) {
         const val ACTIVE_POINTER = "active-index.path"
         const val INDEX_FILE = "index.bin"
         private const val MANIFEST_FILE = "manifest.properties"
-        // schema 9 会强制重建旧索引：修复 jp/JP_ 前缀导致词典权威优先级从未匹配，
-        // 并让放宽后的同源多译阈值立即生效（与 native 端 kIndexSchema 保持同步）。
-        private const val INDEX_SCHEMA = 9
+        // schema 10 强制重建索引：保留词典内日中相同的名称，防止被 UI 同文异译覆盖。
+        // 与 native 端 kIndexSchema 保持同步。
+        private const val INDEX_SCHEMA = 10
         private val INDEX_MAGIC = byteArrayOf('L'.code.toByte(), 'Z'.code.toByte(), 'T'.code.toByte(), 'I'.code.toByte(), '1'.code.toByte(), 0)
     }
 }

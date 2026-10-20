@@ -1,4 +1,5 @@
 #include "LimbusTranslationRuntime.h"
+#include "LimbusTextLayoutPolicy.h"
 #include "../Substrate/SubstrateHook.h"
 
 #include <android/log.h>
@@ -31,7 +32,7 @@
 namespace {
 
 const unsigned char kIndexMagic[] = {'L', 'Z', 'T', 'I', '1', 0};
-const uint32_t kIndexSchema = 9;
+const uint32_t kIndexSchema = 10;
 const uint32_t kMaxEntries = 1000000;
 const uint32_t kMaxStringBytes = 16 * 1024 * 1024;
 
@@ -96,6 +97,10 @@ struct UiComponentState {
 };
 std::unordered_map<void *, UiComponentState> g_original_ui_states;
 uint64_t g_translation_hits = 0;
+std::atomic<uint64_t> g_exact_matches{0};
+std::atomic<uint64_t> g_layout_matches{0};
+std::atomic<uint64_t> g_term_matches{0};
+std::atomic<uint64_t> g_unmatched_texts{0};
 char g_il2cpp_path[PATH_MAX] = {};
 
 struct Il2CppStringLayout {
@@ -195,6 +200,7 @@ const void *g_material_get_float_info = nullptr;
 const void *g_material_set_float_info = nullptr;
 const void *g_material_get_color_info = nullptr;
 const void *g_material_set_color_info = nullptr;
+const void *g_material_enable_keyword_info = nullptr;
 il2cpp_init_fn g_original_il2cpp_init = nullptr;
 dlsym_fn g_original_unity_dlsym = nullptr;
 get_language_fn g_original_get_language = nullptr;
@@ -326,8 +332,7 @@ void rebuild_term_trie() {
     g_term_trie.emplace_back();
     for (const auto &entry : g_terms) {
         if (!is_usable_display_text(entry.first) ||
-            !is_usable_display_text(entry.second) ||
-            entry.first == entry.second) {
+            !is_usable_display_text(entry.second)) {
             continue;
         }
         size_t node = 0;
@@ -379,7 +384,7 @@ bool translate_embedded_terms(const std::string &source, std::string *output) {
                 best_end = cursor + 1;
             }
         }
-        if (best != nullptr && best_source != nullptr) {
+        if (best != nullptr && best_source != nullptr && *best != *best_source) {
             // “呼吸 -> 呼吸法”“以上 -> 或以上”这类包内正式词条必须保留。
             // 若当前命中本来就位于完整译文内部，则跳过，保证对象获取层与 TMP 层
             // 多次经过同一字符串时不会不断追加前后缀。
@@ -427,7 +432,7 @@ bool translate_embedded_terms(const std::string &source, std::string *output) {
         if (best != nullptr) {
             output->append(*best);
             offset = best_end;
-            changed = true;
+            changed = changed || *best != *best_source;
         } else {
             output->push_back(source[offset++]);
         }
@@ -616,6 +621,7 @@ void *translate_managed_string(void *managed_text) {
     std::string translated;
     if (match != g_index.end()) {
         translated = match->second;
+        g_exact_matches.fetch_add(1, std::memory_order_relaxed);
     } else {
         std::string normalized;
         bool line_height_normalized = strip_line_height_tags(source, &normalized);
@@ -624,8 +630,20 @@ void *translate_managed_string(void *managed_text) {
         }
         if (line_height_normalized && match != g_index.end()) {
             translated = apply_dante_line_height(match->second);
+            g_layout_matches.fetch_add(1, std::memory_order_relaxed);
         } else if (!translate_embedded_terms(source, &translated)) {
+            // Metadata only: no game text, user input or account data in logs.
+            uint64_t misses = g_unmatched_texts.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (misses == 1 || misses % 1000 == 0) {
+                LT_LOGI("Text lookup totals exact=%llu layout=%llu terms=%llu unchanged=%llu",
+                        static_cast<unsigned long long>(g_exact_matches.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(g_layout_matches.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(g_term_matches.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(misses));
+            }
             return managed_text;
+        } else {
+            g_term_matches.fetch_add(1, std::memory_order_relaxed);
         }
     }
     if (!is_usable_display_text(translated)) return managed_text;
@@ -675,7 +693,9 @@ bool is_display_string_field(const char *name) {
             "sentence", "story", "openCondition", "openConditionNumber",
             "relatedChapterText", "askLevelUp", "company", "area", "chapter",
             "chapterNumber", "chaptertitle", "parttitle", "timeline", "teacher",
-            "add", "min", "variation", "variation2"
+            "add", "min", "variation", "variation2", "speaker", "displayName", "statText",
+            "goalDescription1", "goalDescription2", "goalDescription3", "goalDescription4",
+            "goalDescription5", "goalDescription6", "goalDescription7", "goalDescription8"
     };
     for (const char *field : fields) {
         if (strcmp(name, field) == 0) return true;
@@ -831,6 +851,9 @@ acquisition2_fn const kAcquisition2Replacements[] = {ACQUISITION_SLOTS(ACQUISITI
 #undef ACQUISITION2_ENTRY
 #undef ACQUISITION_SLOTS
 
+void apply_chinese_material_outline(void *material);
+void *invoke_object_getter(const void *method_info, void *instance);
+
 bool ensure_tmp_font() {
     pthread_mutex_lock(&g_lock);
     if (!g_font_attempted) {
@@ -861,6 +884,10 @@ bool ensure_tmp_font() {
         if (font_path != nullptr && g_runtime_invoke != nullptr) {
             g_tmp_font_asset = g_runtime_invoke(
                     g_create_tmp_font_info, nullptr, asset_args, &exception);
+        }
+        if (g_tmp_font_asset != nullptr) {
+            apply_chinese_material_outline(invoke_object_getter(
+                    g_tmp_font_get_material_info, g_tmp_font_asset));
         }
         // 少数旧界面仍使用 UnityEngine.UI.Text，TMP_FontAsset 无法直接赋给它们。
         // Android 的 sans-serif 是系统复合字体族，会按字符回退到设备内置中文字体，
@@ -1081,14 +1108,31 @@ void apply_material_outline(void *material, const MaterialOutlineStyle &style) {
         g_runtime_invoke(g_material_set_float_info, material, args, &exception);
     }
     if (color_name != nullptr && g_material_set_color_info != nullptr) {
-        // 拼点/技能组件原材质已有描边宽度时，中文材质继承宽度并统一为不透明黑边。
-        // 这样既保留游戏层级感，也不会给原本没有描边的普通正文强行加边。
+        // 保持中文 SDF 自身的材质与图集，只设置黑色描边，不复制日文字体的膨胀参数。
         float black[4] = {0.0f, 0.0f, 0.0f,
                           style.has_color ? std::max(style.color[3], 0.95f) : 1.0f};
         void *args[] = {color_name, black};
         void *exception = nullptr;
         g_runtime_invoke(g_material_set_color_info, material, args, &exception);
     }
+}
+
+void apply_chinese_material_outline(void *material) {
+    if (material == nullptr || g_runtime_invoke == nullptr) return;
+    MaterialOutlineStyle outline;
+    outline.width = 0.12f;
+    outline.has_width = true;
+    outline.has_color = true;
+    apply_material_outline(material, outline);
+    void *keyword = new_managed_string("OUTLINE_ON");
+    if (keyword != nullptr && g_material_enable_keyword_info != nullptr) {
+        void *args[] = {keyword};
+        void *exception = nullptr;
+        g_runtime_invoke(g_material_enable_keyword_info, material, args, &exception);
+    }
+    MaterialOutlineStyle applied = read_material_outline(material);
+    LT_LOGI("Chinese SDF outline material=%p width=%.3f alpha=%.3f keyword=%d",
+            material, applied.width, applied.color[3], g_material_enable_keyword_info != nullptr);
 }
 
 TmpComponentState capture_tmp_component_state(void *instance, void *font) {
@@ -1105,6 +1149,11 @@ TmpComponentState capture_tmp_component_state(void *instance, void *font) {
             g_tmp_get_font_size_max_info, instance, &candidate.font_size_max);
     candidate.has_auto_sizing = invoke_bool_getter(
             g_tmp_get_auto_sizing_info, instance, &candidate.auto_sizing);
+    if (candidate.has_font_size) {
+        candidate.font_size = limbus_text_layout::configured_font_size(
+                candidate.font_size, candidate.has_auto_sizing && candidate.auto_sizing,
+                candidate.has_font_size_max, candidate.font_size_max);
+    }
     candidate.has_word_wrapping = invoke_bool_getter(
             g_tmp_get_word_wrapping_info, instance, &candidate.word_wrapping);
     candidate.has_overflow_mode = invoke_int_getter(
@@ -1293,10 +1342,8 @@ void apply_translated_tmp_style(void *instance, void *managed_text,
     if (!state.has_font_size || state.font_size <= 0.0f) return;
 
     size_t visible_length = count_visible_codepoints(text);
-    bool has_explicit_break = text.find('\n') != std::string::npos ||
-            text.find('\r') != std::string::npos;
+    bool has_explicit_break = limbus_text_layout::has_explicit_break(text);
     ComponentRect rect = read_component_rect(instance, g_tmp_get_rect_transform_info);
-    bool short_text = visible_length <= 48;
     std::string component_name;
     std::string parent_name;
     bool needs_component_identity = has_explicit_break ||
@@ -1310,27 +1357,27 @@ void apply_translated_tmp_style(void *instance, void *managed_text,
     bool personality_group_name = component_name == "[Text]GroupName";
     bool formation_deck_label = component_name == "[Text]Deck" &&
             parent_name == "[Image]Mask";
-    bool single_line = short_text && !has_explicit_break;
+    bool single_line = limbus_text_layout::is_single_line(
+            has_explicit_break, rect.valid, rect.height, state.font_size,
+            state.has_word_wrapping, state.word_wrapping);
 
     if (single_line) {
         // 页签、技能名和横幅必须保持单行。之前只启用自动字号却没有关闭换行，
         // TMP 会先把中文拆成数行，再被一行高的遮罩裁成黄块或黑块。
         invoke_bool_setter(g_tmp_set_word_wrapping_info, instance, false);
-        float scale = visible_length <= 8 ? 1.0f :
-                (visible_length <= 20 ? 0.96f : 0.90f);
         if (rect.valid) {
-            // Ellipsis 与自动字号配合：先在可读字号范围内缩小，仍放不下时才显示省略号。
-            // 战斗技能名因此不会换出第二行，也不会为了显示全名缩成难以辨认的小字。
+            // 保留控件原有的字号范围，不按译文长度额外缩小，同组按钮使用其配置上限。
             invoke_int_setter(g_tmp_set_overflow_mode_info, instance, 1);  // Ellipsis.
             // 左侧编队槽原始字号为 30，在手机上辨识度不足；该控件高度由遮罩动态提供，
             // 因此固定为用户指定的 35，避免自动字号再次把长编队名缩小。
-            float maximum = formation_deck_label ? 35.0f : state.font_size * scale;
-            float minimum = formation_deck_label ? 35.0f :
-                    std::min(maximum, std::max(9.0f, state.font_size * 0.55f));
+            float maximum = formation_deck_label ? 35.0f : state.font_size;
+            float minimum = formation_deck_label || !state.has_font_size_min ? maximum :
+                    std::min(maximum, std::max(1.0f, state.font_size_min));
             invoke_float_setter(g_tmp_set_font_size_min_info, instance, minimum);
             invoke_float_setter(g_tmp_set_font_size_max_info, instance, maximum);
             invoke_float_setter(g_tmp_set_font_size_info, instance, maximum);
-            invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, true);
+            invoke_bool_setter(g_tmp_set_auto_sizing_info, instance,
+                               !formation_deck_label && state.has_auto_sizing && state.auto_sizing);
         } else {
             // 切页重激活时文本会先于布局写入，此时 RectTransform 仍是 0×0；
             // TMP 自动缩放会按零宽矩形把字号压到最小值，且布局完成后不会自动恢复，
@@ -1338,37 +1385,30 @@ void apply_translated_tmp_style(void *instance, void *managed_text,
             // 等下一次有效布局后的文本写入再应用自动缩放。
             invoke_int_setter(g_tmp_set_overflow_mode_info, instance, 0);  // Overflow.
             invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, false);
-            invoke_float_setter(g_tmp_set_font_size_info, instance, state.font_size * scale);
+            invoke_float_setter(g_tmp_set_font_size_info, instance, state.font_size);
         }
         if (state.has_line_spacing) {
             invoke_float_setter(g_tmp_set_line_spacing_info, instance, state.line_spacing);
         }
-    } else if (short_text) {
-        // 汉化包明确保留换行时，使用原字号并扩大上下行距离；不再通过缩小字号
-        // 掩盖重叠。关闭自动换行后只尊重文本已有的换行符，避免额外拆出第三行。
-        invoke_bool_setter(g_tmp_set_word_wrapping_info, instance, false);
-        invoke_int_setter(g_tmp_set_overflow_mode_info, instance, 0);  // Overflow.
-        invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, false);
-        invoke_float_setter(g_tmp_set_font_size_info, instance, state.font_size);
-        // 人格卡名由富文本 line-height 控制，此处归零额外行距，避免两套机制叠加；
-        // 其他多行控件仍使用较温和的 24% 间距。
-        float safe_spacing = personality_group_name ? 0.0f :
-                std::max(state.font_size * 0.24f,
-                         state.has_line_spacing ? state.line_spacing : 0.0f);
-        invoke_float_setter(g_tmp_set_line_spacing_info, instance, safe_spacing);
     } else {
-        // 长说明恢复页面原有换行与溢出策略，字号不再统一缩小 8%；正文优先保持可读。
+        // 说明文字沿用原控件换行规则，保留包内换行与 <br>，不再用 48 字阈值
+        // 把较短的多行说明强制改成单行。人格标题已有独立的包内分行策略。
         if (state.has_word_wrapping) {
-            invoke_bool_setter(g_tmp_set_word_wrapping_info, instance, state.word_wrapping);
+            invoke_bool_setter(g_tmp_set_word_wrapping_info, instance,
+                               personality_group_name ? false : state.word_wrapping);
         }
-        if (state.has_overflow_mode) {
-            invoke_int_setter(g_tmp_set_overflow_mode_info, instance, state.overflow_mode);
+        if (personality_group_name || state.has_overflow_mode) {
+            invoke_int_setter(g_tmp_set_overflow_mode_info, instance,
+                              personality_group_name ? 0 : state.overflow_mode);
         }
-        if (state.has_line_spacing) {
-            invoke_float_setter(g_tmp_set_line_spacing_info, instance, state.line_spacing);
-        }
+        float spacing = limbus_text_layout::multiline_spacing(
+                state.has_line_spacing ? state.line_spacing : 0.0f, state.font_size,
+                text.find("<line-height=") != std::string::npos);
+        invoke_float_setter(g_tmp_set_line_spacing_info, instance,
+                            personality_group_name ? 0.0f : spacing);
         if (state.has_auto_sizing) {
-            invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, state.auto_sizing);
+            invoke_bool_setter(g_tmp_set_auto_sizing_info, instance,
+                               !personality_group_name && rect.valid && state.auto_sizing);
         }
         if (state.has_font_size_min) {
             invoke_float_setter(g_tmp_set_font_size_min_info, instance, state.font_size_min);
@@ -1376,15 +1416,18 @@ void apply_translated_tmp_style(void *instance, void *managed_text,
         if (state.has_font_size_max) {
             invoke_float_setter(g_tmp_set_font_size_max_info, instance, state.font_size_max);
         }
-        invoke_float_setter(g_tmp_set_font_size_info, instance, state.font_size * 0.98f);
+        invoke_float_setter(g_tmp_set_font_size_info, instance, state.font_size);
     }
 
     uint64_t decisions = g_layout_decisions.fetch_add(1, std::memory_order_relaxed) + 1;
     if (decisions <= 20 || decisions % 500 == 0) {
         // 诊断只记录几何和分类，不输出正文内容；用户回传日志即可判断控件为何选了单/双行。
-        LT_LOGI("TMP layout decision=%llu chars=%zu rect=%.1fx%.1f font=%.1f single=%d short=%d",
+        LT_LOGI("TMP layout decision=%llu chars=%zu rect=%.1fx%.1f base=%.1f max=%.1f"
+                " min=%.1f auto=%d wrap=%d single=%d breaks=%d",
                 static_cast<unsigned long long>(decisions), visible_length,
-                rect.width, rect.height, state.font_size, single_line, short_text);
+                rect.width, rect.height, state.font_size, state.font_size_max,
+                state.font_size_min, state.auto_sizing, state.word_wrapping,
+                single_line, has_explicit_break);
     }
 }
 
@@ -1512,11 +1555,11 @@ void apply_translated_ui_style(void *instance, void *managed_text,
         return;
     }
     size_t visible_length = count_visible_codepoints(text);
-    bool has_explicit_break = text.find('\n') != std::string::npos ||
-            text.find('\r') != std::string::npos;
-    bool short_text = visible_length <= 48;
+    bool has_explicit_break = limbus_text_layout::has_explicit_break(text);
     ComponentRect rect = read_component_rect(instance, g_ui_get_rect_transform_info);
-    bool single_line = short_text && !has_explicit_break;
+    bool single_line = limbus_text_layout::is_single_line(
+            has_explicit_break, rect.valid, rect.height, static_cast<float>(state.font_size),
+            state.has_horizontal_overflow, state.horizontal_overflow == 0);
 
     if (single_line) {
         // 旧 UI.Text 没有 TMP 的单行自动缩放。根据矩形宽度直接计算安全字号，
@@ -1527,7 +1570,7 @@ void apply_translated_ui_style(void *instance, void *managed_text,
             scale = std::min(1.0f, rect.width / std::max(1.0f, estimated_width));
         }
         int32_t safe_size = std::max(7, static_cast<int32_t>(
-                static_cast<float>(state.font_size) * scale * 0.96f));
+                static_cast<float>(state.font_size) * scale));
         invoke_bool_setter(g_ui_set_resize_best_fit_info, instance, false);
         invoke_int_setter(g_ui_set_font_size_info, instance, safe_size);
         invoke_int_setter(g_ui_set_horizontal_overflow_info, instance, 1);  // Overflow.
@@ -1536,14 +1579,6 @@ void apply_translated_ui_style(void *instance, void *managed_text,
             invoke_float_setter(g_ui_set_line_spacing_info, instance,
                                 std::max(1.0f, state.line_spacing));
         }
-    } else if (short_text) {
-        // 汉化包明确含换行时保留原字号，并用 Unity UI 的行高倍率拉开上下距离。
-        invoke_bool_setter(g_ui_set_resize_best_fit_info, instance, false);
-        invoke_int_setter(g_ui_set_font_size_info, instance, state.font_size);
-        invoke_int_setter(g_ui_set_horizontal_overflow_info, instance, 0);  // Wrap.
-        invoke_int_setter(g_ui_set_vertical_overflow_info, instance, 1);    // Overflow.
-        invoke_float_setter(g_ui_set_line_spacing_info, instance,
-                            state.has_line_spacing ? std::max(1.24f, state.line_spacing) : 1.24f);
     } else {
         // 正文保留游戏原排版，避免为了塞进一屏而缩成难以阅读的小字。
         if (state.has_resize_best_fit) {
@@ -2245,6 +2280,8 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
             material_class, "GetColor", "System.String");
     const void *material_set_color_method = find_method_by_signature(
             material_class, "SetColor", "System.String,UnityEngine.Color");
+    const void *material_enable_keyword_method = find_method_by_signature(
+            material_class, "EnableKeyword", "System.String");
     const void *get_fallback_fonts_method = tmp_settings_class == nullptr ? nullptr :
             class_get_method_from_name(tmp_settings_class, "get_fallbackFontAssets", 0);
     LT_LOGI("TMP fallback getter class=%p method=%p", tmp_settings_class, get_fallback_fonts_method);
@@ -2374,6 +2411,7 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
         g_material_set_float_info = material_set_float_method;
         g_material_get_color_info = material_get_color_method;
         g_material_set_color_info = material_set_color_method;
+        g_material_enable_keyword_info = material_enable_keyword_method;
         MSHookFunction(tmp_pointer, reinterpret_cast<void *>(replacement_tmp_set_text),
                        reinterpret_cast<void **>(&g_original_tmp_set_text));
         auto has_inline_hook_space = [&](void *klass, void *pointer) {

@@ -1316,21 +1316,30 @@ void apply_translated_tmp_style(void *instance, void *managed_text,
         // 页签、技能名和横幅必须保持单行。之前只启用自动字号却没有关闭换行，
         // TMP 会先把中文拆成数行，再被一行高的遮罩裁成黄块或黑块。
         invoke_bool_setter(g_tmp_set_word_wrapping_info, instance, false);
-        // Ellipsis 与自动字号配合：先在可读字号范围内缩小，仍放不下时才显示省略号。
-        // 战斗技能名因此不会换出第二行，也不会为了显示全名缩成难以辨认的小字。
-        invoke_int_setter(g_tmp_set_overflow_mode_info, instance,
-                          rect.valid ? 1 : 0);  // 有有效宽度时 Ellipsis，否则 Overflow。
         float scale = visible_length <= 8 ? 1.0f :
                 (visible_length <= 20 ? 0.96f : 0.90f);
-        // 左侧编队槽原始字号为 30，在手机上辨识度不足；该控件高度由遮罩动态提供，
-        // 因此固定为用户指定的 35，避免自动字号再次把长编队名缩小。
-        float maximum = formation_deck_label ? 35.0f : state.font_size * scale;
-        float minimum = formation_deck_label ? 35.0f :
-                std::min(maximum, std::max(9.0f, state.font_size * 0.55f));
-        invoke_float_setter(g_tmp_set_font_size_min_info, instance, minimum);
-        invoke_float_setter(g_tmp_set_font_size_max_info, instance, maximum);
-        invoke_float_setter(g_tmp_set_font_size_info, instance, maximum);
-        invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, true);
+        if (rect.valid) {
+            // Ellipsis 与自动字号配合：先在可读字号范围内缩小，仍放不下时才显示省略号。
+            // 战斗技能名因此不会换出第二行，也不会为了显示全名缩成难以辨认的小字。
+            invoke_int_setter(g_tmp_set_overflow_mode_info, instance, 1);  // Ellipsis.
+            // 左侧编队槽原始字号为 30，在手机上辨识度不足；该控件高度由遮罩动态提供，
+            // 因此固定为用户指定的 35，避免自动字号再次把长编队名缩小。
+            float maximum = formation_deck_label ? 35.0f : state.font_size * scale;
+            float minimum = formation_deck_label ? 35.0f :
+                    std::min(maximum, std::max(9.0f, state.font_size * 0.55f));
+            invoke_float_setter(g_tmp_set_font_size_min_info, instance, minimum);
+            invoke_float_setter(g_tmp_set_font_size_max_info, instance, maximum);
+            invoke_float_setter(g_tmp_set_font_size_info, instance, maximum);
+            invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, true);
+        } else {
+            // 切页重激活时文本会先于布局写入，此时 RectTransform 仍是 0×0；
+            // TMP 自动缩放会按零宽矩形把字号压到最小值，且布局完成后不会自动恢复，
+            // 造成"首次进入正常、切回来变小"。矩形无效时保持固定字号 + Overflow，
+            // 等下一次有效布局后的文本写入再应用自动缩放。
+            invoke_int_setter(g_tmp_set_overflow_mode_info, instance, 0);  // Overflow.
+            invoke_bool_setter(g_tmp_set_auto_sizing_info, instance, false);
+            invoke_float_setter(g_tmp_set_font_size_info, instance, state.font_size * scale);
+        }
         if (state.has_line_spacing) {
             invoke_float_setter(g_tmp_set_line_spacing_info, instance, state.line_spacing);
         }

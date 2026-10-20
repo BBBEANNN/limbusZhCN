@@ -4,10 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Translation index fixes on 2026-10-20
+### Translation index and TMP layout fixes on 2026-10-20
 
 - 修复词典权威优先级从未匹配生产 `jp/JP_*` 源路径的问题：Buff/战斗关键词词典重新成为唯一权威译名并强制写入完整索引（schema 9 强制重建）。
 - 放宽同源多译的采纳阈值为 2/3 多数派（≥2 票且 2 倍于第二名），救回约 230 个此前被整体丢弃的词条，例如重试按钮「リトライ → 重试」；1:1 与 2:2 平票仍被丢弃。
+- 修复切页重激活时文本先于布局写入、TMP 按零宽矩形把单行标签字号压到最小且布局完成后不再恢复的问题（表现为"首次进入正常、切走再切回变小"）：矩形无效时保持固定字号与 Overflow，等待有效布局后的文本写入再应用自动缩放。
 
 ### Issue fixes reviewed on 2026-10-19
 

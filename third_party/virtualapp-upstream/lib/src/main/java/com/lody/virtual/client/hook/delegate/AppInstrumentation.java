@@ -44,6 +44,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.Collections;
+import java.util.Map;
 import java.util.WeakHashMap;
 
 import mirror.android.app.ActivityThread;
@@ -70,6 +72,10 @@ public final class AppInstrumentation extends InstrumentationDelegate implements
             "org.microg.gms.auth.login.LoginActivity";
     private static Object sActivityClientControllerBase;
     private static Object sActivityClientControllerProxy;
+    // 仅缓存系统 token 到父组件的元信息，在 onCreate 前发布，不能依赖 ActivityThread 的实例登记时序。
+    // 弱键用于覆盖异常创建后没有 onDestroy 的情况；正常销毁也会显式移除，不保留任何认证参数。
+    private static final Map<IBinder, ComponentName> sMicrogSignInCallingActivities =
+            Collections.synchronizedMap(new WeakHashMap<IBinder, ComponentName>());
     private static boolean sOplusActivityManagerFallbackAttempted;
 
     private static AppInstrumentation gDefault;
@@ -468,13 +474,21 @@ public final class AppInstrumentation extends InstrumentationDelegate implements
         }
         ComponentName callingActivity = null;
         String callingPackage = null;
-        if (GMS_PACKAGE.equals(info.packageName)
-                && MICROG_AUTH_SIGN_IN_ACTIVITY.equals(info.name)) {
-            installActivityClientCallerProxyIfNeeded();
+        String callingActivityClass = LimbusAuthenticationCompat.resolveMicrogSignInCallingActivity(
+                VClient.get().getCurrentPackage(), info.packageName, info.name);
+        if (callingActivityClass != null) {
+            // 新增的 LoginActivity 只在精确同进程桥接中恢复父身份；旧的跨进程 VAMS 路径保持原状。
+            if (MICROG_LOGIN_ACTIVITY.equals(info.name)
+                    && !HCallbackStub.isClientLocalActivityToken(mirror.android.app.Activity.mToken.get(activity))) {
+                return;
+            }
             callingPackage = GMS_PACKAGE;
-            callingActivity = new ComponentName(
-                    GMS_PACKAGE,
-                    MICROG_ASSISTED_SIGN_IN_ACTIVITY);
+            callingActivity = new ComponentName(GMS_PACKAGE, callingActivityClass);
+            IBinder token = mirror.android.app.Activity.mToken.get(activity);
+            if (token != null) {
+                sMicrogSignInCallingActivities.put(token, callingActivity);
+            }
+            installActivityClientCallerProxyIfNeeded();
         }
         if (callingPackage == null || callingActivity == null) {
             return;
@@ -512,14 +526,12 @@ public final class AppInstrumentation extends InstrumentationDelegate implements
                 String name = method.getName();
                 if (args != null && args.length > 0 && args[0] instanceof IBinder
                         && HCallbackStub.isClientLocalActivityToken((IBinder) args[0])) {
-                    if ("getCallingPackage".equals(name)) {
-                        return GMS_PACKAGE;
-                    }
-                    if ("getCallingActivity".equals(name)) {
-                        ComponentName caller = new ComponentName(
-                                GMS_PACKAGE,
-                                MICROG_ASSISTED_SIGN_IN_ACTIVITY);
-                        return caller;
+                    if ("getCallingPackage".equals(name) || "getCallingActivity".equals(name)) {
+                        // onCreate 前已按具体组件登记父身份；不查询尚可能未发布的 ActivityThread 实例。
+                        ComponentName caller = sMicrogSignInCallingActivities.get((IBinder) args[0]);
+                        if (caller != null) {
+                            return "getCallingPackage".equals(name) ? caller.getPackageName() : caller;
+                        }
                     }
                 }
                 return method.invoke(sActivityClientControllerBase, args);
@@ -643,9 +655,19 @@ public final class AppInstrumentation extends InstrumentationDelegate implements
     }
 
 
+    /**
+     * 销毁目标 Activity，并释放仅包含 token 和父组件的 microG 调用方元信息。
+     *
+     * @param activity 即将销毁的目标页面
+     */
     @Override
     public void callActivityOnDestroy(Activity activity) {
-        super.callActivityOnDestroy(activity);
+        try {
+            super.callActivityOnDestroy(activity);
+        } finally {
+            // 保留目标 onDestroy 内的合法调用查询；生命周期返回或抛错后都不再持有该页面的身份。
+            sMicrogSignInCallingActivities.remove(mirror.android.app.Activity.mToken.get(activity));
+        }
     }
 
     @Override

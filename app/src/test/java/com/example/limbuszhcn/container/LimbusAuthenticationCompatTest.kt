@@ -20,6 +20,73 @@ class LimbusAuthenticationCompatTest {
         assertTrue(LimbusAuthenticationCompat.shouldUsePhysicalProviderIdentity(36))
     }
 
+    /** 验证 LoginActivity 只有在 GMS 自身同一虚拟进程中启动时，才保留系统父子结果链。 */
+    @Test
+    fun keepsOnlySameProcessMicrogLoginActivityClientLocal() {
+        val gms = "com.google.android.gms"
+        val loginActivity = "org.microg.gms.auth.login.LoginActivity"
+        assertTrue(LimbusAuthenticationCompat.shouldUseClientLocalMicrogLoginActivity(
+            gms, "$gms:ui", gms, loginActivity, "$gms:ui"))
+        assertFalse(LimbusAuthenticationCompat.shouldUseClientLocalMicrogLoginActivity(
+            "com.ProjectMoon.LimbusCompany", "$gms:ui", gms, loginActivity, "$gms:ui"))
+        assertFalse(LimbusAuthenticationCompat.shouldUseClientLocalMicrogLoginActivity(
+            gms, "$gms:ui", "example.other", loginActivity, "$gms:ui"))
+        assertFalse(LimbusAuthenticationCompat.shouldUseClientLocalMicrogLoginActivity(
+            gms, "$gms:ui", gms, loginActivity, "$gms:other"))
+        assertFalse(LimbusAuthenticationCompat.shouldUseClientLocalMicrogLoginActivity(
+            gms, null, gms, loginActivity, "$gms:ui"))
+        assertFalse(LimbusAuthenticationCompat.shouldUseClientLocalMicrogLoginActivity(
+            gms, "", gms, loginActivity, ""))
+        assertFalse(LimbusAuthenticationCompat.shouldUseClientLocalMicrogLoginActivity(
+            gms, "$gms:ui", gms, loginActivity, null))
+        assertFalse(LimbusAuthenticationCompat.shouldUseClientLocalMicrogLoginActivity(
+            null, "$gms:ui", gms, loginActivity, "$gms:ui"))
+        assertFalse(LimbusAuthenticationCompat.shouldUseClientLocalMicrogLoginActivity(
+            gms, "$gms:ui", null, loginActivity, "$gms:ui"))
+    }
+
+    /** 验证补丁不会按 login 前缀、内部子类或相似类名扩展到其它登录组件。 */
+    @Test
+    fun rejectsOtherMicrogLoginActivityNames() {
+        val gms = "com.google.android.gms"
+        for (otherClass in listOf(
+            "org.microg.gms.auth.login.LoginActivity.Other",
+            "org.microg.gms.auth.login.LoginActivity\$Other",
+            "org.microg.gms.auth.login.OtherActivity",
+            "org.microg.gms.auth.login.LoginActivity2",
+            "org.microg.gms.auth.signin.AuthSignInActivity"
+        )) {
+            assertFalse(LimbusAuthenticationCompat.shouldUseClientLocalMicrogLoginActivity(
+                gms, "$gms:ui", gms, otherClass, "$gms:ui"))
+        }
+        assertFalse(LimbusAuthenticationCompat.shouldUseClientLocalMicrogLoginActivity(
+            gms, "$gms:ui", gms, null, "$gms:ui"))
+    }
+
+    /** 验证两层子页面恢复各自的直接父组件，不把 LoginActivity 的调用方误报为 Assisted 页面。 */
+    @Test
+    fun resolvesExactMicrogSignInParentActivities() {
+        val gms = "com.google.android.gms"
+        assertEquals("org.microg.gms.auth.signin.AssistedSignInActivity",
+            LimbusAuthenticationCompat.resolveMicrogSignInCallingActivity(
+                gms, gms, "org.microg.gms.auth.signin.AuthSignInActivity"))
+        assertEquals("org.microg.gms.auth.signin.AuthSignInActivity",
+            LimbusAuthenticationCompat.resolveMicrogSignInCallingActivity(
+                gms, gms, "org.microg.gms.auth.login.LoginActivity"))
+        assertNull(LimbusAuthenticationCompat.resolveMicrogSignInCallingActivity(
+            "com.ProjectMoon.LimbusCompany", gms, "org.microg.gms.auth.login.LoginActivity"))
+        assertNull(LimbusAuthenticationCompat.resolveMicrogSignInCallingActivity(
+            gms, "example.other", "org.microg.gms.auth.login.LoginActivity"))
+        assertNull(LimbusAuthenticationCompat.resolveMicrogSignInCallingActivity(
+            gms, gms, "org.microg.gms.auth.signin.AssistedSignInActivity"))
+        assertNull(LimbusAuthenticationCompat.resolveMicrogSignInCallingActivity(
+            gms, gms, "org.microg.gms.auth.login.OtherActivity"))
+        assertNull(LimbusAuthenticationCompat.resolveMicrogSignInCallingActivity(
+            gms, gms, "org.microg.gms.auth.login.LoginActivity\$Other"))
+        assertNull(LimbusAuthenticationCompat.resolveMicrogSignInCallingActivity(
+            gms, gms, null))
+    }
+
     /** 验证 Google 登录父子页面均继承 microG 应用主题，并保留 Activity 显式主题的优先级。 */
     @Test
     fun resolvesBothMicrogSignInThemesWithApplicationFallback() {

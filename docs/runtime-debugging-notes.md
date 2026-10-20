@@ -202,6 +202,38 @@ AppSealing 后台 `Thread-5` 会稳定在 `libcovault-appsec.so +0x248d4` 以空
 本轮没有连接原设备。单元测试和 APK 构建只验证策略及编译，不替代 vivo/Android 13、
 Redmi/Android 16 和 OnePlus/ColorOS 16 上的账号选择、结果回传及 Apple 登录实测。
 
+## 2026-10-20 Google 登录页面返回链路
+
+OPPO PHY110 / Android 16 / 4 KiB 页、游戏 v483 的 `fd227bc` 测试已进入标题页，
+两层 microG 主题重建和 Google 登录网页导航均实际命中。当前 Provider 物理身份日志仅
+覆盖 microG UI 的 `query/openTypedAssetFile`；原 Issue #4/#6 的游戏
+`GoogleApiHandler -> call()` 和最终认证结果仍待覆盖，不能仅凭监听器通知宣称登录成功。
+
+用户提交登录/验证后返回桌面，但游戏 p0 与 GMS UI 进程仍存活，原任务还保留 Unity、
+HiddenActivity 和两层登录页面，现有日志没有证明 native 崩溃。调用记录已确认
+`AuthSignInActivity` 以请求码 100 打开 `org.microg.gms.auth.login.LoginActivity`。
+前者属于不登记 VAMS 的 client-local Activity；后者原先没有命中 `signin.*` 路由，
+进入 VAMS 后因找不到父 token 对应的 ActivityRecord，`ActivityStack` 会清空
+`resultTo`，并可能另起 `NEW_TASK/MULTIPLE_TASK/NEW_DOCUMENT` 登录任务，丢失系统父子关系。
+
+修复只增加这一精确的 `LoginActivity`，且要求当前虚拟包与目标包都是 GMS、目标进程与
+当前虚拟进程完全相同。沿用现有 client-local stub 保留系统 resultTo、请求码 100 和
+原始 Intent 参数，不把认证 extras 送到 VAMS 解包，不用拉回前台掩盖结果丢失。
+调用方恢复也必须区分 `AuthSignInActivity <- AssistedSignInActivity` 与
+`LoginActivity <- AuthSignInActivity`，不能把新登录页的父组件误报为 Assisted 页面。
+父组件元信息须在目标 onCreate 前按系统 token 登记，仅存组件名，销毁后移除并以弱键
+兜底；不能依赖 Android 16 在 onCreate 期间已向 ActivityThread 发布 Activity 实例。
+LoginActivity 已声明独立主题并已实际显示；本轮保持它的目标主题处理，不扩大主题补丁。
+
+仍须由设备日志确认 `LoginActivity -> AuthSignInActivity -> AssistedSignInActivity ->
+ShadowPendingActivity -> HiddenActivity` 的结果链以及 Unity 的认证后状态，不能把这个
+局部结果路由修复直接当成 Google 登录全流程已验证。
+
+同日覆盖安装补丁后，选择已有账号的流程记录到 Identity UI `resultCode=-1` 与
+`SetLoginInfo : GOOGLE`，用户确认已进入资源下载。该轮没有重新打开 LoginActivity，
+新增账号提交返回仍待单独复测。已按用户要求停止操作，等待下载结束后验证汉化和设置；
+具体范围见[本次设备记录](device-verification-20261020.md)。
+
 ## Android 16 / ColorOS 16 兼容结论
 
 2026-08-08 在 PHY110、Android 16（API 36）和 Limbus v1.109.1 上完成真机验证。启动已

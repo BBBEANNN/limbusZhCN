@@ -1014,7 +1014,11 @@ class MethodProxies {
                     && activityInfo != null
                     && "com.google.android.gms".equals(activityInfo.packageName)
                     && className != null
-                    && className.startsWith("org.microg.gms.auth.signin.");
+                    && (className.startsWith("org.microg.gms.auth.signin.")
+                    // 同进程 LoginActivity 必须保留 AuthSignInActivity 的系统 resultTo，不能交 VAMS 清空。
+                    || LimbusAuthenticationCompat.shouldUseClientLocalMicrogLoginActivity(getAppPkg(),
+                    VClient.get().getClientConfig() == null ? null : VClient.get().getClientConfig().processName,
+                    activityInfo.packageName, className, ComponentUtils.getProcessName(activityInfo)));
         }
 
         private void logLimbusCredentialNativeMappings() {

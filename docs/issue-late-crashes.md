@@ -54,6 +54,15 @@
 - Android 官方 [ApplicationExitInfo 文档](https://developer.android.com/reference/android/app/ApplicationExitInfo#getTraceInputStream())
   明确说明：已恢复 ANR 的 trace 也可能随其他原因的退出保留，只有 native crash 的 trace
   使用 protobuf。因此不能只给 `REASON_ANR` 使用文本，也不能把 `SIGNALED` 一概写成 `.pb`。
+- 2026-10-20 按 `5f38e27` 只读复核运行时：语言 getter 只返回 JP 并计数，设置刷新
+  没有重新加载索引或创建字体的直接入口；字体状态缓存锁在调用托管 getter/setter 前释放，
+  未发现可确认的锁顺序冲突。`ensure_tmp_font()` 首次创建字体时持有非递归 `g_lock` 调用
+  托管入口，只有这些入口同步重入文本 hook 才可能自锁，现有附件没有对应调用栈。
+  另可确认组件状态缓存没有销毁时清理、译文集合仅增不删的生命周期缺口，但没有缓存规模
+  或对象重建证据将其与本次卡死联系起来，故未据此修改运行时。上述均不是已证实根因。
+- OPPO / Android 16 未激活汉化的基线可以应用技能说明和渲染比例设置；该结果仅覆盖
+  原文运行路径。需先验证非空索引和中文主字体切换/布局日志，再重复设置测试，才能
+  判断译文路径是否改变行为，不能用未激活基线代替汉化后的回归。
 - 此问题仍未根治。原设备需要重现“应用设置”，保留系统无响应提示产生的历史记录，
   再立即导出新诊断；仅切回汉化器时进程尚未退出，系统可能还没有 ANR trace。
 

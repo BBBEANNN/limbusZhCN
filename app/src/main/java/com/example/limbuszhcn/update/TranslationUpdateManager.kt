@@ -3,6 +3,7 @@ package com.example.limbuszhcn.update
 import android.util.Log
 import java.io.BufferedOutputStream
 import java.io.IOException
+import java.io.FilterInputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
@@ -74,7 +75,7 @@ internal class TranslationUpdateManager(
 }
 
 /**
- * 将公开的 GitHub Releases 页面转换为 API 请求，并解析最新汉化归档资产。
+ * 优先查询公开 GitHub Release API，仅在 403/429 时按同仓库官方网页回退。
  *
  * @param releaseUrl GitHub Releases 页面或受支持的 GitHub API 地址。
  * @param transport 发起 GitHub API 请求的传输实现。
@@ -89,17 +90,25 @@ internal class GitHubTranslationReleaseClient(
      * @return 数字版本、公开下载地址和 GitHub 提供的可选 SHA-256。
      */
     fun fetchRelease(): GitHubTranslationRelease {
+        val source = GitHubReleaseSource.parse(releaseUrl)
         val response = transport.execute(
             HttpRequest(
-                url = releaseUrl.toGitHubApiReleaseUrl(),
+                url = source.apiUrl,
                 method = "GET",
                 headers = mapOf(
                     "Accept" to "application/vnd.github+json",
                     "User-Agent" to DEFAULT_USER_AGENT
-                )
+                ),
+                readTimeoutMillis = 30_000
             )
         )
+        if (response.statusCode == 403 || response.statusCode == 429) {
+            // 仅 API 拒绝/限流有一次公开页回退；401/404 等明确仓库不可访问错误不能被掩盖。
+            response.body.close()
+            return GitHubReleasePageFallback(source, transport).fetchRelease()
+        }
         if (response.statusCode != HttpURLConnection.HTTP_OK) {
+            response.body.close()
             throw TranslationHttpException("HTTP ${response.statusCode} from GitHub release API")
         }
         val body = response.bodyText().trim()
@@ -110,13 +119,17 @@ internal class GitHubTranslationReleaseClient(
         }
         val tag = STRING_FIELD.find(releaseJson, "tag_name")
             ?: throw TranslationProtocolException("Missing tag_name in GitHub release response")
+        // 固定 tag 是调用方明确选择的版本，API 不得悄悄改为另一条发布记录。
+        if (source.tag != null && source.tag != tag) {
+            throw TranslationProtocolException("GitHub release API returned a different tag")
+        }
         val version = tag.toLongOrNull()
             ?: throw TranslationProtocolException("GitHub release tag is not numeric: $tag")
         val asset = pickMainAsset(releaseJson, version)
             ?: throw TranslationProtocolException("GitHub release does not contain LimbusLocalize_${version}.7z")
         return GitHubTranslationRelease(
             version = version,
-            assetUrl = asset.url,
+            assetUrl = source.validatedAssetUrl(asset.url, tag, version),
             sha256 = asset.sha256
         )
     }
@@ -126,51 +139,22 @@ internal class GitHubTranslationReleaseClient(
         return ASSET_FIELDS.findAll(json)
             .mapNotNull { match ->
                 val name = match.groupValues[1].jsonUnescape()
-                if (!name.equals(expected, ignoreCase = true) && !name.endsWith(".7z", ignoreCase = true)) {
+                if (!name.equals(expected, ignoreCase = true)) {
                     return@mapNotNull null
                 }
                 val digest = match.groupValues[2].jsonUnescape()
                 val url = match.groupValues[3].jsonUnescape()
+                if (digest.isNotBlank() && !Regex("sha256:[0-9a-fA-F]{64}").matches(digest)) {
+                    throw TranslationProtocolException("Invalid GitHub archive SHA-256")
+                }
                 GitHubAsset(
                     name = name,
                     url = url,
-                    sha256 = digest.removePrefix("sha256:").takeIf { it.isNotBlank() }
+                    sha256 = digest.removePrefix("sha256:").lowercase().takeIf { it.isNotBlank() }
                 )
             }
             .sortedWith(compareByDescending<GitHubAsset> { it.name.equals(expected, ignoreCase = true) })
             .firstOrNull()
-    }
-
-    private fun String.toGitHubApiReleaseUrl(): String {
-        val trimmed = trim()
-        val uri = runCatching { URI(trimmed) }.getOrElse {
-            throw TranslationProtocolException("Invalid GitHub release URL")
-        }
-        if (!uri.scheme.equals("https", ignoreCase = true)) {
-            throw TranslationProtocolException("GitHub release URL must use HTTPS")
-        }
-        if (uri.rawUserInfo != null || uri.port !in setOf(-1, 443)) {
-            // Releases 地址属于公开配置，不允许嵌入用户名、口令或转发到自定义端口。
-            throw TranslationProtocolException("GitHub release URL must not contain credentials or a custom port")
-        }
-        val host = uri.host?.lowercase()
-            ?: throw TranslationProtocolException("GitHub release URL does not contain a host")
-        if (host == "api.github.com" && uri.path.startsWith("/repos/") && uri.path.contains("/releases")) {
-            return trimmed
-        }
-        if (host != "github.com") {
-            throw TranslationProtocolException("Only github.com Releases URLs are supported")
-        }
-        val parts = uri.path
-            .trim('/')
-            .split('/')
-        if (parts.size >= 5 && parts[2] == "releases" && parts[3] == "tag") {
-            return "https://api.github.com/repos/${parts[0]}/${parts[1]}/releases/tags/${parts[4]}"
-        }
-        if (parts.size >= 3 && parts[2] == "releases") {
-            return "https://api.github.com/repos/${parts[0]}/${parts[1]}/releases?per_page=1"
-        }
-        throw TranslationProtocolException("Unsupported GitHub release URL")
     }
 
     private fun String.firstJsonObjectInArray(): String {
@@ -219,7 +203,7 @@ internal class GitHubTranslationReleaseClient(
         private val ASSET_FIELDS = Regex(
             """"url"\s*:\s*"https://api\.github\.com/repos/[^"]+/releases/assets/[^"]+".*?""" +
                 """"name"\s*:\s*"((?:\\.|[^"\\])*)".*?""" +
-                """"digest"\s*:\s*"((?:\\.|[^"\\])*)".*?""" +
+                """"digest"\s*:\s*(?:"((?:\\.|[^"\\])*)"|null).*?""" +
                 """"browser_download_url"\s*:\s*"((?:\\.|[^"\\])*)"""",
             RegexOption.DOT_MATCHES_ALL
         )
@@ -243,6 +227,15 @@ internal class TranslationPackageDownloader(
      * @return 最终归档路径以及是否命中已验证缓存。
      */
     fun download(request: DownloadRequest): DownloadResult {
+        // 下载入口自身也验证官方资产路径，不能依赖调用方恰好来自已验证的 Release。
+        val assetUri = githubHttpsUri(request.url)
+        val parts = assetUri.rawPath.trim('/').split('/')
+        if (parts.size != 6 || parts[2] != "releases" || parts[3] != "download") {
+            throw TranslationProtocolException("Only exact GitHub release archives can be downloaded")
+        }
+        GitHubReleaseSource.parse("https://github.com/${parts[0]}/${parts[1]}/releases/tag/${parts[4]}")
+            .validatedAssetUrl(request.url, parts[4], request.version.toLongOrNull()
+                ?: throw TranslationProtocolException("Archive version is not numeric"))
         request.destinationDirectory.createDirectories()
         val finalFile = request.destinationDirectory.resolve("LimbusLocalize_${request.version}.7z")
         if (finalFile.exists() && request.expectedSha256 != null && sha256(finalFile) == request.expectedSha256) {
@@ -258,10 +251,12 @@ internal class TranslationPackageDownloader(
                     HttpRequest(
                         url = request.url,
                         method = "GET",
-                        headers = mapOf("User-Agent" to "limbuszhcn-android")
+                        headers = mapOf("User-Agent" to "limbuszhcn-android"),
+                        redirectPolicy = GitHubRedirectPolicy.RELEASE_ASSET
                     )
                 )
                 if (response.statusCode != HttpURLConnection.HTTP_OK) {
+                    response.body.close()
                     throw TranslationHttpException("HTTP ${response.statusCode} while downloading GitHub package")
                 }
 
@@ -353,24 +348,50 @@ internal class UrlConnectionHttpTransport(
      * @return 尚未消费的响应流及其元数据。
      */
     override fun execute(request: HttpRequest): HttpResponse {
-        val connection = (URL(request.url).openConnection() as HttpURLConnection).apply {
-            requestMethod = request.method
-            connectTimeout = connectTimeoutMillis
-            readTimeout = readTimeoutMillis
-            request.headers.forEach { (name, value) -> setRequestProperty(name, value) }
-            if (request.body != null) {
-                doOutput = true
-                outputStream.use { it.write(request.body) }
+        val initial = githubHttpsUri(request.url)
+        if (initial.host.lowercase() !in setOf("github.com", "api.github.com")) {
+            throw TranslationProtocolException("HTTP transport only accepts public GitHub sources")
+        }
+        var currentUrl = request.url
+        for (redirectCount in 0..5) {
+            val connection = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
+                instanceFollowRedirects = false
+                requestMethod = request.method
+                connectTimeout = connectTimeoutMillis
+                readTimeout = request.readTimeoutMillis ?: readTimeoutMillis
+                request.headers.forEach { (name, value) -> setRequestProperty(name, value) }
+                if (request.body != null) {
+                    doOutput = true
+                    outputStream.use { it.write(request.body) }
+                }
+            }
+            try {
+                val status = connection.responseCode
+                if (status in setOf(301, 302, 303, 307, 308) && request.redirectPolicy != GitHubRedirectPolicy.NONE) {
+                    val location = connection.getHeaderField("Location")
+                        ?: throw TranslationProtocolException("GitHub redirect is missing Location")
+                    val target = URI(currentUrl).resolve(location).toString()
+                    if (redirectCount == 5 || !allowsGitHubRedirect(request.url, target, request.redirectPolicy)) {
+                        throw TranslationProtocolException("GitHub redirect exceeds its repository, host or count boundary")
+                    }
+                    connection.disconnect()
+                    currentUrl = target
+                    continue
+                }
+                val body = if (status in 200..299) connection.inputStream else connection.errorStream
+                // 调用方关闭正文时断开连接，API 403 和页面错误也必须释放底层资源。
+                val ownedBody = object : FilterInputStream(body ?: ByteArray(0).inputStream()) {
+                    override fun close() {
+                        try { super.close() } finally { connection.disconnect() }
+                    }
+                }
+                return HttpResponse(status, connection.contentLengthLong, ownedBody)
+            } catch (error: Exception) {
+                connection.disconnect()
+                throw error
             }
         }
-
-        val status = connection.responseCode
-        val body = if (status in 200..299) connection.inputStream else connection.errorStream
-        return HttpResponse(
-            statusCode = status,
-            contentLength = connection.contentLengthLong,
-            body = body ?: ByteArray(0).inputStream()
-        )
+        throw TranslationProtocolException("GitHub redirect count exceeded")
     }
 }
 
@@ -409,12 +430,23 @@ private data class GitHubAsset(
     val sha256: String?
 )
 
-/** 描述传输边界可执行的 HTTP 请求。 */
+/**
+ * 描述传输边界可执行的 HTTP 请求。
+ *
+ * @property url 已验证的公开 GitHub 地址
+ * @property method HTTP 方法
+ * @property body 可选请求正文
+ * @property headers 固定的公开协议请求头，不包含账号或 Token
+ * @property redirectPolicy 此请求允许的有限官方重定向类别
+ * @property readTimeoutMillis 可选读取超时；元数据使用较短时限，归档沿用下载时限
+ */
 internal data class HttpRequest(
     val url: String,
     val method: String,
     val body: ByteArray? = null,
-    val headers: Map<String, String> = emptyMap()
+    val headers: Map<String, String> = emptyMap(),
+    val redirectPolicy: GitHubRedirectPolicy = GitHubRedirectPolicy.NONE,
+    val readTimeoutMillis: Int? = null
 )
 
 /** 描述尚未被消费的 HTTP 响应。 */
@@ -426,9 +458,21 @@ internal data class HttpResponse(
     /**
      * 读取并关闭响应流。
      *
-     * @return 使用 UTF-8 解码后的完整响应正文。
+     * @param maxBytes 元数据正文允许的最大字节数，不信任服务端声明的长度
+     * @return 使用 UTF-8 解码后的完整响应正文，超限时拒绝解析
      */
-    fun bodyText(): String = body.use { String(it.readBytes(), Charsets.UTF_8) }
+    fun bodyText(maxBytes: Int = 2 * 1024 * 1024): String = body.use { input ->
+        if (contentLength > maxBytes) throw TranslationProtocolException("GitHub metadata response is too large")
+        val output = java.io.ByteArrayOutputStream(minOf(maxBytes, 8192))
+        val buffer = ByteArray(8192)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            if (output.size() + count > maxBytes) throw TranslationProtocolException("GitHub metadata response is too large")
+            output.write(buffer, 0, count)
+        }
+        String(output.toByteArray(), Charsets.UTF_8)
+    }
 }
 
 /** 汉化更新流程可预期错误的共同基类。 */

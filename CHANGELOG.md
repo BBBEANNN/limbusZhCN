@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Resource migration and translation verification for 1.5
+
+- 高级设置增加资源迁出/迁入：系统文件选择器、流式资源 ZIP、逐文件 SHA-256、进度与取消；迁入保留已有文件，并支持失败回滚与中断恢复。资源包排除账号、PlayerPrefs、APK、代码和临时下载，不能给不同签名的旧安装补装迁出功能。
+- 中文 TMP 保留原控件字号基准与换行，移除按字符数统一缩字；自动字号基准改用配置上限。中文 SDF 增加轻微不透明黑边，改善高亮文字在浅色背景上的辨识度。
+- schema 10 保留词典内原译文相同的名称，防止 Buff「保存」被 UI 同文译名「检查点」覆盖；禁止纯标点参与嵌入术语，避免改写代码样式文本。
+- 补齐 11 个 RPG 显示字段；资源数组严格按表内标识对应，数量相等的重复剧情 ID 按本组出现次序对应。新增有大小上限且不含正文的逐字段覆盖报告，以及调用生产编译器/native 查找逻辑的可复现离线工具。
+- 构建与校验完成：单元测试 98 通过、3 跳过，设备 native 回归 33 通过，194,787 条字段完成查找核对。3,490 条语义复核记录保留逐条定位；新包游戏界面、SAF 与多 GB 迁移尚未真机验收，详见 `docs/translation-font-verification-20261020.md`。
+
 ### Translation index and TMP layout fixes on 2026-10-20
 
 - 修复词典权威优先级从未匹配生产 `jp/JP_*` 源路径的问题：Buff/战斗关键词词典重新成为唯一权威译名并强制写入完整索引（schema 9 强制重建）。

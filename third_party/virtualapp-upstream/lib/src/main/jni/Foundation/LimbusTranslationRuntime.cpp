@@ -31,7 +31,7 @@
 namespace {
 
 const unsigned char kIndexMagic[] = {'L', 'Z', 'T', 'I', '1', 0};
-const uint32_t kIndexSchema = 8;
+const uint32_t kIndexSchema = 9;
 const uint32_t kMaxEntries = 1000000;
 const uint32_t kMaxStringBytes = 16 * 1024 * 1024;
 

@@ -139,6 +139,51 @@ class TranslationIndexCompilerTest {
         assertFalse(compiled.termEntries.containsKey("喘息未定"))
     }
 
+    /** 验证生产 jp/JP_ 路径下词典权威优先级依然压过页面译名。 */
+    @Test
+    fun appliesGlossaryPriorityToProductionJapaneseSourcePaths() {
+        val compiler = TranslationIndexCompiler().apply {
+            repeat(4) { index ->
+                add(record("jp/JP_Passives.json", "passive-$index", "name", "呼吸", "喘息未定"))
+            }
+            add(record("jp/JP_Bufs.json", "Breath", "name", "呼吸", "呼吸法"))
+            add(record("jp/JP_LoginUIText.json", "retry", "content", "リトライ", "重试"))
+            add(record("jp/JP_RailwayDungeonUI_2.json", "retry", "content", "リトライ", "再次挑战"))
+            add(record("jp/JP_BattleKeywords.json", "retry", "name", "リトライ", "重试"))
+        }
+
+        val compiled = compiler.compile("2026102001", "archive")
+
+        assertEquals("呼吸法", compiled.uniqueEntries["呼吸"])
+        assertEquals("呼吸法", compiled.termEntries["呼吸"])
+        assertFalse(compiled.termEntries.containsKey("喘息未定"))
+        assertEquals("重试", compiled.uniqueEntries["リトライ"])
+    }
+
+    /** 验证 2:1 多数派在放宽阈值后直接采纳，1:1 与 2:2 平票仍被丢弃。 */
+    @Test
+    fun adoptsTwoThirdsMajorityTranslations() {
+        val compiler = TranslationIndexCompiler().apply {
+            add(record("jp/JP_LoginUIText.json", "retry", "content", "リトライ", "重试"))
+            add(record("jp/JP_MainUIText.json", "retry", "content", "リトライ", "重试"))
+            add(record("jp/JP_RailwayDungeonUI_2.json", "retry", "content", "リトライ", "再次挑战"))
+            add(record("jp/JP_Battle.json", "one", "content", "撤退", "退场"))
+            add(record("jp/JP_Story.json", "two", "content", "撤退", "撤退失败"))
+            add(record("jp/JP_StageA.json", "a", "content", "準備中", "准备中"))
+            add(record("jp/JP_StageB.json", "b", "content", "準備中", "正在准备"))
+            add(record("jp/JP_StageC.json", "c", "content", "準備中", "准备中"))
+            add(record("jp/JP_StageD.json", "d", "content", "準備中", "正在准备"))
+        }
+
+        val compiled = compiler.compile("2026102001", "archive")
+
+        assertEquals("重试", compiled.uniqueEntries["リトライ"])
+        assertEquals(1, compiled.dominantEntryCount)
+        assertFalse(compiled.uniqueEntries.containsKey("撤退"))
+        assertFalse(compiled.uniqueEntries.containsKey("準備中"))
+        assertEquals(2, compiled.conflictCount)
+    }
+
     @Test
     fun activatesImmutableBinaryIndexAndPointer() {
         val root = Files.createTempDirectory("limbus-index-test")
@@ -150,11 +195,11 @@ class TranslationIndexCompilerTest {
         val indexFile = TranslationIndexStore(root).activate(compiled)
 
         assertTrue(indexFile.exists())
-        assertTrue(indexFile.parent.fileName.toString().contains("-s8-"))
+        assertTrue(indexFile.parent.fileName.toString().contains("-s9-"))
         assertEquals(indexFile.toString().replace('\\', '/'), root.resolve("active-index.path").readText().trim())
         DataInputStream(indexFile.inputStream()).use { input ->
             assertEquals("LZTI1\u0000", String(input.readNBytes(6), Charsets.US_ASCII))
-            assertEquals(8, input.readInt())
+            assertEquals(9, input.readInt())
             assertEquals(1, input.readInt())
             assertEquals(1, input.readInt())
             assertEquals("Sinner", input.readSizedUtf8())

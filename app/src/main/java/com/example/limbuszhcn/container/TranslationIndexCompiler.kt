@@ -190,13 +190,18 @@ internal class TranslationIndexCompiler {
         val winner = ranked.first()
         val runnerUp = ranked.getOrNull(1)?.value ?: 0
         val total = counts.values.sum()
+        // 阈值从 ≥3 票/80%/3 倍放宽为 ≥2 票/2/3/2 倍：真实包里「リトライ→重试」这类
+        // 2:1 多数派此前被整体丢弃，界面因此直接显示日文；1:1 与 2:2 平票仍保持丢弃。
         return winner.key.takeIf {
-            winner.value >= 3 && winner.value * 5 >= total * 4 && winner.value >= runnerUp * 3
+            winner.value >= 2 && winner.value * 3 >= total * 2 && winner.value >= runnerUp * 2
         }
     }
 
     private fun termSourcePriority(path: String): Int {
-        val fileName = path.substringAfterLast('/').substringAfterLast('\\').lowercase()
+        val rawFileName = path.substringAfterLast('/').substringAfterLast('\\').lowercase()
+        // activateRedirect 传入的是 japaneseSourceFor 生成的 jp/<目录>/JP_<文件>.json，
+        // 直接匹配 bufs/battlekeywords 前缀永远落空，词典权威优先级在真机上从未生效。
+        val fileName = rawFileName.removePrefix("jp_")
         return when {
             fileName.startsWith("bufs") || fileName.startsWith("battlekeywords") ->
                 CANONICAL_GLOSSARY_PRIORITY
@@ -406,8 +411,9 @@ internal class TranslationIndexStore(private val root: Path) {
         const val ACTIVE_POINTER = "active-index.path"
         const val INDEX_FILE = "index.bin"
         private const val MANIFEST_FILE = "manifest.properties"
-        // schema 8 会强制重建旧索引，使包内词典优先级与条件术语派生立即生效。
-        private const val INDEX_SCHEMA = 8
+        // schema 9 会强制重建旧索引：修复 jp/JP_ 前缀导致词典权威优先级从未匹配，
+        // 并让放宽后的同源多译阈值立即生效（与 native 端 kIndexSchema 保持同步）。
+        private const val INDEX_SCHEMA = 9
         private val INDEX_MAGIC = byteArrayOf('L'.code.toByte(), 'Z'.code.toByte(), 'T'.code.toByte(), 'I'.code.toByte(), '1'.code.toByte(), 0)
     }
 }

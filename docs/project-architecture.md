@@ -39,6 +39,22 @@ flowchart LR
     Storage --> Game
 ```
 
+## 汉化器自身更新
+
+汉化器 APK 更新与汉化包更新是两个独立流程。主界面每次进入前台时，后台查询固定官方仓库
+`BBBEANNN/limbusZhCN` 的最新稳定 GitHub Release；检查或下载失败只显示状态，不阻塞游戏启动。
+仅接受该仓库的单一 APK 资产，跳过草稿与预发布，不跟随用户可编辑的汉化包 Releases 地址。
+发现新版本后自动下载到宿主私有缓存，先核对 GitHub SHA-256（提供时）、包名、递增的
+`versionCode`、最低 Android 版本以及当前安装的签名，再交给 Android 系统安装器。
+安装权限未开启时引导用户授权，返回后继续安装；系统安装确认仍须由用户完成。
+
+检查与下载由 Activity 的 ViewModel 持有，避免旋转屏幕重复请求；设置页和安装页返回时
+不重新触发同一轮检查。安装器只通过专用 FileProvider 获得更新 APK 的临时只读 URI。
+不得卸载旧版、清除宿主或容器数据，不修改游戏 APK。正式发布必须沿用同一签名，同时提高
+数字 `versionName`、对应的 Release 标签（例如 `v1.6`）与 `versionCode`，APK 命名为
+`LimbusZhCN-<tag>.apk`。下载前按数字版本名筛选，下载后以 APK 实际版本号最终拒绝降级；
+签名不同的历史安装只报告无法覆盖，不提示用户卸载。
+
 ## Container Data Preservation
 
 After the game reaches the post-login resource download flow, the VirtualApp
@@ -212,8 +228,10 @@ component's wrapping policy. Font, material and layout restoration on component
 reuse remain part of the runtime boundary.
 
 The generated Chinese TMP SDF material uses a small, opaque black outline
-(`_OutlineWidth=0.12`, `OUTLINE_ON`) so highlighted text remains legible on light
-panels. It retains the Chinese atlas and shader; Japanese material parameters
+(`_OutlineWidth=0.12`, `_FaceDilate=0.12`, `OUTLINE_ON`) so highlighted text remains
+legible on light panels. TMP outlines otherwise extend inward as well as outward:
+the equal face dilation preserves the original filled glyph boundary and moves
+the black border outside it. It retains the Chinese atlas and shader; Japanese material parameters
 are not copied onto that atlas. The component's original material is restored
 when translated text is released.
 
@@ -284,7 +302,7 @@ whose translations still contain the source, such as `以上 -> 或以上`, are 
 from embedded matching so repeated `SkillPerLevel -> Skill -> TMP` passes remain
 idempotent. Canonical identity terms remain eligible and protect entire spans.
 The compiler and native object-graph traversal use the same explicit display-field
-policy. In addition to the original skill/UI fields, schema 10 includes verified
+policy. In addition to the original skill/UI fields, schema 11 includes verified
 display values such as `story`, `relatedChapterText`, and `openConditionNumber`.
 Translations containing Unicode replacement characters or illegal control bytes
 are omitted so a damaged package entry leaves the official Japanese text intact.
@@ -347,6 +365,13 @@ temporary archives remain in the application cache and are replaced on the next
 export.
 
 ### Bundled microG bootstrap
+
+Android 8.0/8.1（API 26/27）校验内置 APK 时使用 `GET_SIGNATURES`、
+`PackageInfo.signatures` 和旧版 `versionCode`；API 28 起才使用
+`GET_SIGNING_CERTIFICATES`、`signingInfo` 和 `longVersionCode`。两个分支均须核对
+同一清单中的包名、版本与证书摘要，不能为兼容旧系统跳过签名校验。
+运行时索引指针使用 API 26 已支持的 `Paths.get` 解析。宿主声明
+`POST_NOTIFICATIONS`，供容器转发通知使用；不把通知授权设为游戏启动前提。
 
 The production application packages the exact microG Services and Companion
 APKs already validated by the container login flow. A bundled properties

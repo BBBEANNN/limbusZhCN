@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 安装器只能临时读取这个专用缓存目录，不共享游戏资源和账号数据。 -->
+    <cache-path name="app_update" path="app-updates/" />
+</paths>

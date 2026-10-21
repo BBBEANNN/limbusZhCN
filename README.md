@@ -10,6 +10,7 @@
 
 ## 当前状态
 
+- 最新正式版：[v1.5.1](https://github.com/BBBEANNN/limbusZhCN/releases/tag/v1.5.1)。包含汉化器自身更新、翻译匹配修复、中文描边补偿与资源迁移。
 - 目标游戏包名：`com.ProjectMoon.LimbusCompany`
 - 汉化器包名：`com.example.limbuszhcn`
 - 最低系统版本：Android 8.0 / API 26（与当前游戏本体一致）
@@ -27,6 +28,11 @@
   - 登录后进入资源下载流程
 
 资源下载很大。进入资源下载阶段后，不要清空容器数据，也不要卸载容器内的游戏包，否则会触发重新下载。
+
+从 v1.5.1 起，每次打开或返回汉化器前台都会检查官方 GitHub 稳定版，发现新版会自动下载并
+核对版本、完整性与签名，再交给 Android 系统确认安装；首次可能需要允许安装来源。
+v1.5.1 沿用 v1.4 正式版签名，可直接覆盖升级并保留数据。此前 `v1.5-test-20261020`
+预发布包使用另一张证书，不能直接覆盖；请保留旧安装，不要为了升级卸载并丢失容器数据。
 
 主界面的“设备兼容”卡片会检查系统版本、arm64、实际内存页、低内存模式与后台限制。
 在 vivo/iQOO 等设备上首次使用时，建议点击“打开后台兼容设置”，允许汉化器自启动、
@@ -134,11 +140,9 @@ Limbus Company 通常会随 Google Play 周更。宿主机游戏更新后，应�
 
 游戏文本文件通常要在登录并进入主流程后才会下载。标题页或登录阶段目录为空是正常现象。
 
-JSON 补丁只能结构化修改这些字段：
-
-- `dataList[].content`
-- `dataList[].dialog`
-- `dataList[].teller`
+JSON 补丁递归配对明确的显示文本字段，白名单统一维护在
+`TranslationTextPolicy.DISPLAY_FIELDS`，包括 `content`、`dialog`、`teller`、`name`、
+`desc` 等。当前使用日语单源 schema 11 索引，编译端与 native 必须一致。
 
 不得修改 `id`、`personalityid`、`voicefile`、`usage` 等元数据字段。
 

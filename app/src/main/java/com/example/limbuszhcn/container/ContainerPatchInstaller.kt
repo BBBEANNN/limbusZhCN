@@ -9,6 +9,7 @@ import com.example.limbuszhcn.update.PatchManifest
 import com.example.limbuszhcn.update.TranslationUpdateManager
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.util.Base64
 import java.util.LinkedHashSet
 import kotlin.io.path.isDirectory
@@ -69,7 +70,8 @@ class ContainerPatchInstaller(
     fun activeInstallSummary(): PatchInstallSummary? {
         if (activeIndexPointer().isRegularFile()) {
             val indexFile = runCatching {
-                Path.of(activeIndexPointer().readText(Charsets.UTF_8).trim())
+                // Path.of 在 Android 14 才可用；索引恢复也必须兼容最低支持的 Android 8。
+                Paths.get(activeIndexPointer().readText(Charsets.UTF_8).trim())
             }.getOrNull()
             val indexManifest = indexFile?.parent?.resolve(INDEX_MANIFEST_FILE)
             if (indexManifest != null && indexManifest.isRegularFile()) {
@@ -108,6 +110,7 @@ class ContainerPatchInstaller(
     /**
      * 使用最近一次缓存的 GitHub 汉化包重新编译并激活运行时索引。
      *
+     * @param auditDirectory 可选的开发诊断输出目录；为空时不生成覆盖审计。
      * @return 重新编译后的资源统计和索引激活摘要。
      */
     fun refreshActiveRedirects(auditDirectory: Path? = null): PatchInstallSummary {
@@ -126,6 +129,7 @@ class ContainerPatchInstaller(
      *
      * @param patchDirectory 已解压的汉化包缓存目录。
      * @param manifest 汉化包文件清单和版本信息。
+     * @param auditDirectory 可选的开发诊断输出目录；为空时不生成覆盖审计。
      * @return 候选资源、可读日文源文件和索引激活结果。
      */
     fun activateRedirect(

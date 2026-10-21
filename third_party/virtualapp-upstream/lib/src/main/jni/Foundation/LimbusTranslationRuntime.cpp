@@ -1,5 +1,6 @@
 #include "LimbusTranslationRuntime.h"
 #include "LimbusTextLayoutPolicy.h"
+#include "LimbusTranslationProvenance.h"
 #include "../Substrate/SubstrateHook.h"
 
 #include <android/log.h>
@@ -32,7 +33,7 @@
 namespace {
 
 const unsigned char kIndexMagic[] = {'L', 'Z', 'T', 'I', '1', 0};
-const uint32_t kIndexSchema = 10;
+const uint32_t kIndexSchema = 11;
 const uint32_t kMaxEntries = 1000000;
 const uint32_t kMaxStringBytes = 16 * 1024 * 1024;
 
@@ -59,6 +60,17 @@ void *g_tmp_font_asset = nullptr;
 void *g_ui_font = nullptr;
 // 译文来源按 UTF-8 内容登记，避免游戏复制 IL2CPP String 后丢失仅依赖对象地址的字体标记。
 std::unordered_set<std::string> g_translated_managed_texts;
+// 弱句柄只证明同一个存活的托管对象来自接管层；不靠文本内容猜测是否已经翻译。
+// 有界弱缓存只回收已死对象，GC 可正常回收字符串，地址复用也不会继承旧来源凭据。
+constexpr size_t kMaxTranslatedOrigins = 262144;
+struct TranslatedStringOrigin {
+    void *object = nullptr;
+    uintptr_t handle = 0;
+};
+std::vector<TranslatedStringOrigin> g_translated_origin_slots;
+std::vector<size_t> g_free_translated_origin_slots;
+size_t g_translated_origin_cursor = 0;
+std::unordered_map<void *, uintptr_t> g_translated_string_origins;
 struct TmpComponentState {
     void *font = nullptr;
     void *shared_material = nullptr;
@@ -113,6 +125,10 @@ struct Il2CppStringLayout {
 typedef int32_t (*string_length_fn)(void *);
 typedef const uint16_t *(*string_chars_fn)(void *);
 typedef void *(*string_new_utf16_fn)(const uint16_t *, int32_t);
+// arm64 的句柄作为不透明整数传递，兼容 IL2CPP 的整数/指针宽度句柄表示。
+typedef uintptr_t (*gchandle_new_weakref_fn)(void *, bool);
+typedef void *(*gchandle_get_target_fn)(uintptr_t);
+typedef void (*gchandle_free_fn)(uintptr_t);
 typedef void *(*create_dynamic_font_fn)(void *, int32_t, const void *);
 typedef void *(*create_tmp_font_fn)(void *, const void *);
 typedef void *(*runtime_invoke_fn)(const void *, void *, void **, void **);
@@ -137,6 +153,9 @@ typedef void (*field_set_value_fn)(void *, const void *, void *);
 string_length_fn g_string_length = nullptr;
 string_chars_fn g_string_chars = nullptr;
 string_new_utf16_fn g_string_new_utf16 = nullptr;
+gchandle_new_weakref_fn g_gchandle_new_weakref = nullptr;
+gchandle_get_target_fn g_gchandle_get_target = nullptr;
+gchandle_free_fn g_gchandle_free = nullptr;
 create_dynamic_font_fn g_create_dynamic_font = nullptr;
 create_tmp_font_fn g_create_tmp_font = nullptr;
 runtime_invoke_fn g_runtime_invoke = nullptr;
@@ -309,8 +328,31 @@ bool is_usable_display_text(const std::string &value) {
 }
 
 bool contains_japanese_kana(const std::string &value) {
+    // link/ruby 等属性可能保留日文键；控制标签中的假名不能判定可见正文仍未翻译。
+    std::string visible;
+    visible.reserve(value.size());
+    for (size_t offset = 0; offset < value.size();) {
+        if (value[offset] == '<') {
+            size_t end = value.find('>', offset + 1);
+            size_t name = offset + 1;
+            if (name < value.size() && value[name] == '/') ++name;
+            size_t name_end = name;
+            while (name_end < value.size() &&
+                   ((value[name_end] >= 'a' && value[name_end] <= 'z') ||
+                    (value[name_end] >= 'A' && value[name_end] <= 'Z') || value[name_end] == '-')) ++name_end;
+            // 但丁对白可能用 <えっと…> 包句子，不能把这类正文当成 TMP 属性丢掉。
+            bool control_name = name_end > name && name_end < value.size() &&
+                    (value[name_end] == '=' || value[name_end] == '>' || value[name_end] == ' ' ||
+                     value[name_end] == '/' || value[name_end] == '\t');
+            if (end != std::string::npos && control_name) {
+                offset = end + 1;
+                continue;
+            }
+        }
+        visible.push_back(value[offset++]);
+    }
     std::u16string utf16;
-    if (!utf8_to_utf16(value, &utf16)) return false;
+    if (!utf8_to_utf16(visible, &utf16)) return false;
     return std::any_of(utf16.begin(), utf16.end(), [](char16_t character) {
         // 覆盖平假名、片假名、片假名扩展与半角片假名。日文汉字与中文共用码位，
         // 不能单凭汉字判定，否则会误伤“振動 -> 震颤”一类合法术语。
@@ -331,6 +373,8 @@ void rebuild_term_trie() {
     g_term_trie.clear();
     g_term_trie.emplace_back();
     for (const auto &entry : g_terms) {
+        // 二进制与编译器都拦截非幂等扩展词，不能依赖邻域文本碰巧包含完整译文。
+        if (entry.first != entry.second && entry.second.find(entry.first) != std::string::npos) continue;
         if (!is_usable_display_text(entry.first) ||
             !is_usable_display_text(entry.second)) {
             continue;
@@ -352,12 +396,28 @@ void rebuild_term_trie() {
     }
 }
 
-bool translate_embedded_terms(const std::string &source, std::string *output) {
+bool translate_embedded_terms(
+        const std::string &source, std::string *output,
+        const std::vector<limbus_translation_guard::ProtectedSpan> *protected_spans = nullptr) {
     if (g_term_trie.size() <= 1) return false;
     output->clear();
     output->reserve(source.size());
     bool changed = false;
+    size_t protected_index = 0;
     for (size_t offset = 0; offset < source.size();) {
+        // 这些区间来自本次 formatter 已汉化的字段模板，参数区域仍继续查词。
+        if (protected_spans != nullptr) {
+            while (protected_index < protected_spans->size() &&
+                   (*protected_spans)[protected_index].end <= offset) ++protected_index;
+            if (protected_index < protected_spans->size()) {
+                const auto &span = (*protected_spans)[protected_index];
+                if (span.begin <= offset && offset < span.end) {
+                    output->append(source, offset, span.end - offset);
+                    offset = span.end;
+                    continue;
+                }
+            }
+        }
         // TMP rich-text markup is control data, not display text.  In
         // particular, an ASCII term such as "or" must never rewrite the tail
         // of <color> into <col或>, which makes TMP display the broken tag.
@@ -374,6 +434,8 @@ bool translate_embedded_terms(const std::string &source, std::string *output) {
         const std::string *best_source = nullptr;
         const std::string *best = nullptr;
         for (size_t cursor = offset; cursor < source.size(); ++cursor) {
+            if (protected_spans != nullptr && protected_index < protected_spans->size() &&
+                cursor >= (*protected_spans)[protected_index].begin) break;
             unsigned char byte = static_cast<unsigned char>(source[cursor]);
             auto child = g_term_trie[node].children.find(byte);
             if (child == g_term_trie[node].children.end()) break;
@@ -384,34 +446,12 @@ bool translate_embedded_terms(const std::string &source, std::string *output) {
                 best_end = cursor + 1;
             }
         }
-        if (best != nullptr && best_source != nullptr && *best != *best_source) {
-            // “呼吸 -> 呼吸法”“以上 -> 或以上”这类包内正式词条必须保留。
-            // 若当前命中本来就位于完整译文内部，则跳过，保证对象获取层与 TMP 层
-            // 多次经过同一字符串时不会不断追加前后缀。
-            size_t translated_offset = best->find(*best_source);
-            bool already_translated = false;
-            while (translated_offset != std::string::npos) {
-                if (offset >= translated_offset) {
-                    size_t translated_start = offset - translated_offset;
-                    if (source.compare(translated_start, best->size(), *best) == 0) {
-                        already_translated = true;
-                        break;
-                    }
-                }
-                translated_offset = best->find(*best_source, translated_offset + 1);
-            }
-            if (already_translated) {
-                best = nullptr;
-                best_source = nullptr;
-            }
-        }
         if (best != nullptr) {
             bool ascii_word = true;
             for (size_t index = offset; index < best_end; ++index) {
                 unsigned char byte = static_cast<unsigned char>(source[index]);
-                if (!(byte >= '0' && byte <= '9') &&
-                    !(byte >= 'A' && byte <= 'Z') &&
-                    !(byte >= 'a' && byte <= 'z') && byte != '_') {
+                // 带方括号或标点的英文术语仍是 ASCII，不能让 [Binding]2 命中 [Binding]20。
+                if (byte >= 0x80) {
                     ascii_word = false;
                     break;
                 }
@@ -454,6 +494,12 @@ bool strip_line_height_tags(const std::string &source, std::string *output) {
         if (source.compare(offset, 13, "<line-height=") == 0) {
             size_t end = source.find('>', offset + 13);
             if (end != std::string::npos) {
+                const std::string tag = source.substr(offset, end - offset + 1);
+                if (tag != "<line-height=170%>" && tag != "<line-height=100%>") {
+                    // 混入其他布局时拒绝本次归一化，保留整段原始结构供常规匹配处理。
+                    *output = source;
+                    return false;
+                }
                 offset = end + 1;
                 changed = true;
                 continue;
@@ -607,7 +653,133 @@ std::string reflow_personality_title(const std::string &text, size_t *line_count
     return output;
 }
 
-void *translate_managed_string(void *managed_text) {
+/** 为当前 formatter 保存已汉化字段模板，离开调用栈即丢弃，避免跨页面内容碰撞。 */
+struct FormatterTranslationScope;
+bool is_translation_owned_string(void *text);
+thread_local FormatterTranslationScope *g_formatter_translation_scope = nullptr;
+struct FormatterTranslationScope {
+    FormatterTranslationScope *previous = g_formatter_translation_scope;
+    std::vector<std::string> templates;
+    std::string result;
+    size_t bytes = 0;
+    bool truncated = false;
+    bool result_incomplete = false;
+
+    // 每层 formatter 独立收集字段，嵌套返回后恢复上层，不共享其他线程的参数。
+    FormatterTranslationScope() { g_formatter_translation_scope = this; }
+    ~FormatterTranslationScope();
+};
+
+/** 仅记录接管层已经产生的字段值，供同一 formatter 的字面区间保护使用。 */
+void remember_formatter_translation(const std::string &text) {
+    auto *scope = g_formatter_translation_scope;
+    if (scope == nullptr || text.empty()) return;
+    if (text.size() > 64 * 1024 || scope->templates.size() >= 256 ||
+        scope->bytes + text.size() > 256 * 1024) {
+        scope->truncated = true;
+        return;
+    }
+    if (std::find(scope->templates.begin(), scope->templates.end(), text) == scope->templates.end()) {
+        scope->templates.push_back(text);
+        scope->bytes += text.size();
+    }
+}
+
+FormatterTranslationScope::~FormatterTranslationScope() {
+    g_formatter_translation_scope = previous;
+    // 只把子 formatter 的最终返回值交给上层参数，不泄漏子对象的其他私有字段模板。
+    if (!result.empty()) remember_formatter_translation(result);
+    if (result_incomplete && previous != nullptr) previous->truncated = true;
+}
+
+/** 记录本层最终返回给上层的已译值，参数复制成新字符串后仍能在同一调用链保留来源。 */
+void remember_formatter_result(FormatterTranslationScope *scope, void *text) {
+    if (scope == nullptr || !is_translation_owned_string(text)) return;
+    int32_t length = g_string_length(text);
+    if (length >= 0 && length <= 65536) {
+        utf16_to_utf8(g_string_chars(text), length, &scope->result);
+    } else {
+        scope->result_incomplete = true;
+    }
+}
+
+/** 检查弱句柄当前仍指向同一个活对象，旧地址被 GC 复用时不能跳过新的日文字符串。 */
+bool is_translation_owned_string(void *text) {
+    if (text == nullptr || g_gchandle_get_target == nullptr) return false;
+    pthread_mutex_lock(&g_font_state_lock);
+    auto found = g_translated_string_origins.find(text);
+    bool owned = found != g_translated_string_origins.end() &&
+            g_gchandle_get_target(found->second) == text;
+    if (found != g_translated_string_origins.end() && !owned) g_translated_string_origins.erase(found);
+    pthread_mutex_unlock(&g_font_state_lock);
+    return owned;
+}
+
+/** 登记新建译文的弱来源；只回收失效句柄，所有凭据存活并满额时拒绝发布新译文。 */
+bool remember_translation_owned_string(void *text, size_t capacity = kMaxTranslatedOrigins) {
+    if (text == nullptr || g_gchandle_new_weakref == nullptr ||
+        g_gchandle_get_target == nullptr || g_gchandle_free == nullptr) return false;
+    uintptr_t handle = g_gchandle_new_weakref(text, false);
+    if (handle == 0) return false;
+    pthread_mutex_lock(&g_font_state_lock);
+    // 每次增量扫描少量弱凭据；只回收已被 GC 收走的对象，不淘汰仍存活的原地汉化字段。
+    size_t scans = std::min<size_t>(32, g_translated_origin_slots.size());
+    if (g_translated_origin_slots.size() >= capacity && g_free_translated_origin_slots.empty()) {
+        scans = g_translated_origin_slots.size();
+    }
+    for (size_t index = 0; index < scans && !g_translated_origin_slots.empty(); ++index) {
+        size_t position = g_translated_origin_cursor++ % g_translated_origin_slots.size();
+        auto &candidate = g_translated_origin_slots[position];
+        if (candidate.handle == 0 || g_gchandle_get_target(candidate.handle) != nullptr) continue;
+        auto old = g_translated_string_origins.find(candidate.object);
+        if (old != g_translated_string_origins.end() && old->second == candidate.handle) {
+            g_translated_string_origins.erase(old);
+        }
+        g_gchandle_free(candidate.handle);
+        candidate.object = nullptr;
+        candidate.handle = 0;
+        g_free_translated_origin_slots.push_back(position);
+    }
+    size_t position = 0;
+    if (!g_free_translated_origin_slots.empty()) {
+        position = g_free_translated_origin_slots.back();
+        g_free_translated_origin_slots.pop_back();
+    } else if (g_translated_origin_slots.size() < capacity) {
+        position = g_translated_origin_slots.size();
+        g_translated_origin_slots.emplace_back();
+    } else {
+        // 所有凭据都存活且达到固定上限时，宁可保留本次原文，也不能发布失去来源的中文。
+        g_gchandle_free(handle);
+        pthread_mutex_unlock(&g_font_state_lock);
+        return false;
+    }
+    auto &slot = g_translated_origin_slots[position];
+    // 容器 native 使用 C++11；带默认成员值的类型不能按聚合列表赋值。
+    slot.object = text;
+    slot.handle = handle;
+    g_translated_string_origins[text] = handle;
+    pthread_mutex_unlock(&g_font_state_lock);
+    return true;
+}
+
+/** 独立审计隔离每条探针的来源状态；生产中的弱缓存自然按上限淘汰。 */
+void clear_translation_owned_strings() {
+    pthread_mutex_lock(&g_font_state_lock);
+    for (auto &slot : g_translated_origin_slots) {
+        if (slot.handle != 0 && g_gchandle_free != nullptr) g_gchandle_free(slot.handle);
+        slot.object = nullptr;
+        slot.handle = 0;
+    }
+    g_translated_origin_cursor = 0;
+    g_translated_origin_slots.clear();
+    g_free_translated_origin_slots.clear();
+    g_translated_string_origins.clear();
+    pthread_mutex_unlock(&g_font_state_lock);
+}
+
+void *translate_managed_string(
+        void *managed_text, const std::vector<std::string> *formatter_templates = nullptr,
+        bool formatter_provenance_incomplete = false) {
     if (managed_text == nullptr || g_string_length == nullptr || g_string_chars == nullptr) {
         return managed_text;
     }
@@ -617,31 +789,46 @@ void *translate_managed_string(void *managed_text) {
         !utf16_to_utf8(g_string_chars(managed_text), length, &source)) {
         return managed_text;
     }
+    if (is_translation_owned_string(managed_text)) {
+        remember_formatter_translation(source);
+        return managed_text;
+    }
+    auto protected_spans = formatter_templates == nullptr ?
+            std::vector<limbus_translation_guard::ProtectedSpan>() :
+            limbus_translation_guard::protected_template_spans(source, *formatter_templates);
     std::unordered_map<std::string, std::string>::const_iterator match = g_index.find(source);
     std::string translated;
-    if (match != g_index.end()) {
+    if (formatter_provenance_incomplete) {
+        // 来源模板截断时不能猜测哪些中文片段可再译；保留 formatter 的现有输出并续传凭据。
+        translated = source;
+    } else if (protected_spans.empty() && match != g_index.end()) {
         translated = match->second;
         g_exact_matches.fetch_add(1, std::memory_order_relaxed);
     } else {
         std::string normalized;
-        bool line_height_normalized = strip_line_height_tags(source, &normalized);
+        bool line_height_normalized = protected_spans.empty() && strip_line_height_tags(source, &normalized);
         if (line_height_normalized) {
             match = g_index.find(normalized);
         }
         if (line_height_normalized && match != g_index.end()) {
             translated = apply_dante_line_height(match->second);
             g_layout_matches.fetch_add(1, std::memory_order_relaxed);
-        } else if (!translate_embedded_terms(source, &translated)) {
-            // Metadata only: no game text, user input or account data in logs.
-            uint64_t misses = g_unmatched_texts.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (misses == 1 || misses % 1000 == 0) {
-                LT_LOGI("Text lookup totals exact=%llu layout=%llu terms=%llu unchanged=%llu",
-                        static_cast<unsigned long long>(g_exact_matches.load(std::memory_order_relaxed)),
-                        static_cast<unsigned long long>(g_layout_matches.load(std::memory_order_relaxed)),
-                        static_cast<unsigned long long>(g_term_matches.load(std::memory_order_relaxed)),
-                        static_cast<unsigned long long>(misses));
+        } else if (!translate_embedded_terms(source, &translated, &protected_spans)) {
+            if (!protected_spans.empty()) {
+                // 原 formatter 已使用本次汉化字段，即使只替换了数字也要传递新的来源凭据。
+                translated = source;
+            } else {
+                // Metadata only: no game text, user input or account data in logs.
+                uint64_t misses = g_unmatched_texts.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (misses == 1 || misses % 1000 == 0) {
+                    LT_LOGI("Text lookup totals exact=%llu layout=%llu terms=%llu unchanged=%llu",
+                            static_cast<unsigned long long>(g_exact_matches.load(std::memory_order_relaxed)),
+                            static_cast<unsigned long long>(g_layout_matches.load(std::memory_order_relaxed)),
+                            static_cast<unsigned long long>(g_term_matches.load(std::memory_order_relaxed)),
+                            static_cast<unsigned long long>(misses));
+                }
+                return managed_text;
             }
-            return managed_text;
         } else {
             g_term_matches.fetch_add(1, std::memory_order_relaxed);
         }
@@ -649,6 +836,8 @@ void *translate_managed_string(void *managed_text) {
     if (!is_usable_display_text(translated)) return managed_text;
     void *replacement = new_managed_string(translated);
     if (replacement != nullptr) {
+        if (!remember_translation_owned_string(replacement)) return managed_text;
+        remember_formatter_translation(translated);
         pthread_mutex_lock(&g_font_state_lock);
         // 只登记接管层确实生成过的完整译文，不能按“含非 ASCII”泛化为中文主字体。
         g_translated_managed_texts.insert(translated);
@@ -806,17 +995,29 @@ acquisition1_fn g_acquisition1[kAcquisitionSlots] = {};
 acquisition2_fn g_acquisition2[kAcquisitionSlots] = {};
 
 void *invoke_acquisition0(size_t slot, void *instance, const void *method) {
+    FormatterTranslationScope scope;
     translate_object_graph(instance);
-    return translate_managed_string(g_acquisition0[slot](instance, method));
+    void *formatted = g_acquisition0[slot](instance, method);
+    void *result = translate_managed_string(formatted, &scope.templates, scope.truncated);
+    remember_formatter_result(&scope, result);
+    return result;
 }
 void *invoke_acquisition1(size_t slot, void *instance, void *arg0, const void *method) {
+    FormatterTranslationScope scope;
     translate_object_graph(instance);
-    return translate_managed_string(g_acquisition1[slot](instance, arg0, method));
+    void *formatted = g_acquisition1[slot](instance, arg0, method);
+    void *result = translate_managed_string(formatted, &scope.templates, scope.truncated);
+    remember_formatter_result(&scope, result);
+    return result;
 }
 void *invoke_acquisition2(size_t slot, void *instance, void *arg0, void *arg1,
                           const void *method) {
+    FormatterTranslationScope scope;
     translate_object_graph(instance);
-    return translate_managed_string(g_acquisition2[slot](instance, arg0, arg1, method));
+    void *formatted = g_acquisition2[slot](instance, arg0, arg1, method);
+    void *result = translate_managed_string(formatted, &scope.templates, scope.truncated);
+    remember_formatter_result(&scope, result);
+    return result;
 }
 
 #define ACQUISITION_SLOTS(X) \
@@ -1059,8 +1260,11 @@ std::string read_unity_parent_name(void *component) {
 
 struct MaterialOutlineStyle {
     float width = 0.0f;
+    // 只记录中文材质自身的字面补偿，不读取或复制日文材质的膨胀设置。
+    float face_dilate = 0.0f;
     float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     bool has_width = false;
+    bool has_face_dilate = false;
     bool has_color = false;
 };
 
@@ -1070,6 +1274,7 @@ MaterialOutlineStyle read_material_outline(void *material) {
         return style;
     }
     void *width_name = new_managed_string("_OutlineWidth");
+    void *dilate_name = new_managed_string("_FaceDilate");
     void *color_name = new_managed_string("_OutlineColor");
     if (width_name != nullptr && g_material_get_float_info != nullptr) {
         void *args[] = {width_name};
@@ -1079,6 +1284,16 @@ MaterialOutlineStyle read_material_outline(void *material) {
         if (unboxed != nullptr) {
             memcpy(&style.width, unboxed, sizeof(style.width));
             style.has_width = true;
+        }
+    }
+    if (dilate_name != nullptr && g_material_get_float_info != nullptr) {
+        void *args[] = {dilate_name};
+        void *exception = nullptr;
+        void *boxed = g_runtime_invoke(g_material_get_float_info, material, args, &exception);
+        void *unboxed = exception == nullptr && boxed != nullptr ? g_object_unbox(boxed) : nullptr;
+        if (unboxed != nullptr) {
+            memcpy(&style.face_dilate, unboxed, sizeof(style.face_dilate));
+            style.has_face_dilate = true;
         }
     }
     if (color_name != nullptr && g_material_get_color_info != nullptr) {
@@ -1100,7 +1315,15 @@ void apply_material_outline(void *material, const MaterialOutlineStyle &style) {
         return;
     }
     void *width_name = new_managed_string("_OutlineWidth");
+    void *dilate_name = new_managed_string("_FaceDilate");
     void *color_name = new_managed_string("_OutlineColor");
+    if (style.has_face_dilate && dilate_name != nullptr && g_material_set_float_info != nullptr) {
+        // TMP 的填充阈值同时受描边宽度和字面膨胀影响；等宽补偿避免细笔画被黑边侵蚀。
+        float dilate = style.face_dilate;
+        void *args[] = {dilate_name, &dilate};
+        void *exception = nullptr;
+        g_runtime_invoke(g_material_set_float_info, material, args, &exception);
+    }
     if (width_name != nullptr && g_material_set_float_info != nullptr) {
         float width = style.width;
         void *args[] = {width_name, &width};
@@ -1120,8 +1343,10 @@ void apply_material_outline(void *material, const MaterialOutlineStyle &style) {
 void apply_chinese_material_outline(void *material) {
     if (material == nullptr || g_runtime_invoke == nullptr) return;
     MaterialOutlineStyle outline;
-    outline.width = 0.12f;
+    outline.width = limbus_text_layout::kChineseOutlineWidth;
+    outline.face_dilate = limbus_text_layout::kChineseFaceDilate;
     outline.has_width = true;
+    outline.has_face_dilate = true;
     outline.has_color = true;
     apply_material_outline(material, outline);
     void *keyword = new_managed_string("OUTLINE_ON");
@@ -1131,8 +1356,10 @@ void apply_chinese_material_outline(void *material) {
         g_runtime_invoke(g_material_enable_keyword_info, material, args, &exception);
     }
     MaterialOutlineStyle applied = read_material_outline(material);
-    LT_LOGI("Chinese SDF outline material=%p width=%.3f alpha=%.3f keyword=%d",
-            material, applied.width, applied.color[3], g_material_enable_keyword_info != nullptr);
+    // 回读实际材质值，设备验收时可区分参数写入失败与后续游戏材质覆盖。
+    LT_LOGI("Chinese SDF outline material=%p width=%.3f faceDilate=%.3f alpha=%.3f keyword=%d",
+            material, applied.width, applied.face_dilate, applied.color[3],
+            g_material_enable_keyword_info != nullptr);
 }
 
 TmpComponentState capture_tmp_component_state(void *instance, void *font) {
@@ -1464,6 +1691,7 @@ void *apply_tmp_component_layout_markup(void *instance, void *managed_text) {
     std::string formatted = apply_uniform_line_height(reflowed, 150);
     void *replacement = new_managed_string(formatted);
     if (replacement == nullptr) return managed_text;
+    if (!remember_translation_owned_string(replacement)) return managed_text;
     pthread_mutex_lock(&g_font_state_lock);
     g_translated_managed_texts.insert(formatted);
     pthread_mutex_unlock(&g_font_state_lock);
@@ -1974,6 +2202,11 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
     string_chars_fn string_chars = resolver.resolve<string_chars_fn>("il2cpp_string_chars");
     string_new_utf16_fn string_new_utf16 =
             resolver.resolve<string_new_utf16_fn>("il2cpp_string_new_utf16");
+    gchandle_new_weakref_fn gchandle_new_weakref =
+            resolver.resolve<gchandle_new_weakref_fn>("il2cpp_gchandle_new_weakref");
+    gchandle_get_target_fn gchandle_get_target =
+            resolver.resolve<gchandle_get_target_fn>("il2cpp_gchandle_get_target");
+    gchandle_free_fn gchandle_free = resolver.resolve<gchandle_free_fn>("il2cpp_gchandle_free");
     runtime_invoke_fn runtime_invoke = resolver.resolve<runtime_invoke_fn>("il2cpp_runtime_invoke");
     object_get_class_fn object_get_class =
             resolver.resolve<object_get_class_fn>("il2cpp_object_get_class");
@@ -2341,11 +2574,18 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
             create_tmp_font_pointer != nullptr && create_dynamic_font_pointer != nullptr &&
             get_global_language_pointer != nullptr &&
             string_length != nullptr && string_chars != nullptr && string_new_utf16 != nullptr &&
+            gchandle_new_weakref != nullptr && gchandle_get_target != nullptr && gchandle_free != nullptr &&
             runtime_invoke != nullptr && object_get_class != nullptr && object_unbox != nullptr;
+    LT_LOGI("Translation provenance weakHandles=%d capacity=%zu",
+            gchandle_new_weakref != nullptr && gchandle_get_target != nullptr && gchandle_free != nullptr,
+            kMaxTranslatedOrigins);
     if (hook_ready && !g_hook_installed) {
         g_string_length = string_length;
         g_string_chars = string_chars;
         g_string_new_utf16 = string_new_utf16;
+        g_gchandle_new_weakref = gchandle_new_weakref;
+        g_gchandle_get_target = gchandle_get_target;
+        g_gchandle_free = gchandle_free;
         g_runtime_invoke = runtime_invoke;
         g_object_get_class = object_get_class;
         g_object_unbox = object_unbox;

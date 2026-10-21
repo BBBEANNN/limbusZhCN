@@ -49,6 +49,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModelProvider
+import com.example.limbuszhcn.update.AppUpdateCard
+import com.example.limbuszhcn.update.AppUpdateViewModel
 import com.example.limbuszhcn.container.AndroidContainerRuntimeFactory
 import com.example.limbuszhcn.container.AndroidInstalledGameImporter
 import com.example.limbuszhcn.container.ContainerPatchInstaller
@@ -69,6 +72,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class MainActivity : ComponentActivity() {
     private lateinit var containerRuntime: ContainerRuntime
+    private val appUpdateModel: AppUpdateViewModel by lazy {
+        ViewModelProvider(this)[AppUpdateViewModel::class.java]
+    }
 
     /**
      * 创建主界面并初始化容器运行时，同时迁移旧版本遗留的中转服务配置。
@@ -343,6 +349,7 @@ class MainActivity : ComponentActivity() {
                     busy = busy,
                     busyMessage = busyMessage,
                     message = message,
+                    appUpdateContent = { AppUpdateCard(appUpdateModel, busy) },
                     onExportResources = {
                         val stamp = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
                         createResourceDocument.launch("LimbusResources-$stamp.zip")
@@ -459,6 +466,30 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    /** 宿主进入前台时检查自身版本；不在 Application 或游戏访客进程内执行。 */
+    override fun onStart() {
+        super.onStart()
+        appUpdateModel.onHostStarted()
+    }
+
+    /** 恢复交互后允许接收下载完成产生的安装请求。 */
+    override fun onResume() {
+        super.onResume()
+        appUpdateModel.updateHostResumed(true)
+    }
+
+    /** 离开前台立即禁止打开安装界面，避免打断容器内游戏。 */
+    override fun onPause() {
+        appUpdateModel.updateHostResumed(false)
+        super.onPause()
+    }
+
+    /** 记录真正的后台切换，使下次打开时重新自检且旋转屏幕不重复下载。 */
+    override fun onStop() {
+        appUpdateModel.onHostStopped(isChangingConfigurations)
+        super.onStop()
     }
 
     /**
@@ -665,7 +696,8 @@ private fun LimbusApp(
     onExportDebugLogs: () -> Unit,
     onExportResources: () -> Unit = {},
     onImportResources: () -> Unit = {},
-    onCancelTask: (() -> Unit)? = null
+    onCancelTask: (() -> Unit)? = null,
+    appUpdateContent: @Composable () -> Unit = {}
 ) {
     var advancedExpanded by remember { mutableStateOf(false) }
     Scaffold(
@@ -715,6 +747,7 @@ private fun LimbusApp(
                 lastInstall = lastInstall,
                 message = message
             )
+            appUpdateContent()
             CompatibilityCard(
                 report = compatibilityReport,
                 busy = busy,

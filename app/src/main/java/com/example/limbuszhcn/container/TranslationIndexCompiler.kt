@@ -134,7 +134,7 @@ internal class TranslationIndexCompiler {
         val termCandidates = mutableListOf<TermCandidate>()
         sorted.forEach { record ->
             val priority = termSourcePriority(record.path)
-            if (TranslationTextPolicy.isTermField(record.field)) {
+            if (TranslationTextPolicy.isTermSource(record.path, record.field)) {
                 normalizedTerms(record.source, record.translation, isCanonicalTerm(record))
                     .forEach { (source, translation) ->
                         termCandidates += TermCandidate(source, translation, priority)
@@ -152,12 +152,17 @@ internal class TranslationIndexCompiler {
             val preferred = candidates.filter { candidate -> candidate.priority == highestPriority }
             val translations = preferred.groupingBy(TermCandidate::translation).eachCount()
             resolveTranslation(translations)?.let { translation ->
-                terms[source] = translation
                 if (highestPriority == CANONICAL_GLOSSARY_PRIORITY) {
                     // TMP 最终只提供字符串、没有资源 ID。发生同文异译时，以下载包的
                     // Buff/战斗关键词词典作为界面格式化后的唯一权威译名。
                     unique[source] = translation
                 }
+                // 先确定权威译名，再筛掉非幂等扩展词。不能先丢弃词典候选，否则同源的
+                // 低优先级译名会重新进入 trie；词典全文优先级也不能依赖术语是否安全。
+                candidateTerm(
+                    source, translation,
+                    allowIdentity = highestPriority == CANONICAL_GLOSSARY_PRIORITY
+                )?.let { (safeSource, safeTranslation) -> terms[safeSource] = safeTranslation }
             }
         }
         val digest = MessageDigest.getInstance("SHA-256")
@@ -223,11 +228,13 @@ internal class TranslationIndexCompiler {
         allowIdentity: Boolean
     ): Set<Pair<String, String>> {
         return buildSet {
-            candidateTerm(source, translation, allowIdentity)?.let(::add)
+            // 此处只收集形状合适的候选；在统一解决来源优先级之后再检查嵌入幂等性。
+            candidateTerm(source, translation, allowIdentity, requireIdempotence = false)?.let(::add)
             candidateTerm(
                 RICH_TEXT_TAG.replace(source, ""),
                 RICH_TEXT_TAG.replace(translation, ""),
-                allowIdentity
+                allowIdentity,
+                requireIdempotence = false
             )?.let(::add)
             val sourceBracketTerms = SQUARE_BRACKET_CONTENT.findAll(source)
                 .map { match -> match.groupValues[1] }
@@ -239,7 +246,9 @@ internal class TranslationIndexCompiler {
                 // 游戏格式化器可能只输出方括号内部的可见名称。同步派生内部术语，
                 // 让所有同类标签在格式化后仍能二次汉化，而不是只修某个页面或角色。
                 sourceBracketTerms.zip(translationBracketTerms).forEach { (sourceTerm, translationTerm) ->
-                    candidateTerm(sourceTerm, translationTerm, allowIdentity)?.let(::add)
+                    candidateTerm(
+                        sourceTerm, translationTerm, allowIdentity, requireIdempotence = false
+                    )?.let(::add)
                 }
             }
         }
@@ -254,12 +263,15 @@ internal class TranslationIndexCompiler {
         if (sourceLines.size != translationLines.size) return emptySet()
         return buildSet {
             sourceLines.zip(translationLines).forEach { (sourceLine, translationLine) ->
-                // 技能说明通常以“条件，效果”逐行对齐。只取第一个标点前的条件，
-                // 译名完全来自下载包，供游戏把标签格式化成日文后再次命中。
+                // 只有明确以“时/前/后/情况”等日文条件结尾的前缀才能跨页面复用。
+                // 普通叙述中的“西部、东部…”或“当然、…”仍只参与全文匹配。
                 val sourceClause = sourceLine.leadingClause()
                 val translationClause = translationLine.leadingClause()
-                if (sourceClause != null && translationClause != null) {
-                    candidateTerm(sourceClause, translationClause)?.let(::add)
+                if (sourceClause != null && sourceClause.isTimingOrConditionClause() &&
+                    translationClause != null) {
+                    candidateTerm(
+                        sourceClause, translationClause, requireIdempotence = false
+                    )?.let(::add)
                 }
             }
         }
@@ -268,7 +280,8 @@ internal class TranslationIndexCompiler {
     private fun candidateTerm(
         sourceValue: String,
         translationValue: String,
-        allowIdentity: Boolean = false
+        allowIdentity: Boolean = false,
+        requireIdempotence: Boolean = true
     ): Pair<String, String>? {
         val normalizedSource = sourceValue.trim().stripPairedBrackets()
         val normalizedTranslation = translationValue.trim().stripPairedBrackets()
@@ -276,8 +289,18 @@ internal class TranslationIndexCompiler {
             normalizedSource.isTermLike(minimumCodePoints = 2) &&
                 normalizedSource.any(Char::isLetter) &&
                 normalizedTranslation.isTermLike(minimumCodePoints = 1) &&
-                (allowIdentity || normalizedSource != normalizedTranslation)
+                (allowIdentity || normalizedSource != normalizedTranslation) &&
+                // “以上 -> 或以上”“呼吸 -> 呼吸法”再次扫描时仍会命中原词。
+                // 这类映射保留全文，只有词典同文保护可以安全进入嵌入 trie。
+                (!requireIdempotence || normalizedSource == normalizedTranslation ||
+                    !normalizedTranslation.contains(normalizedSource))
         }
+    }
+
+    /** 仅识别明确的日文时机/条件标签，不从逗号前普通叙述猜测通用译名。 */
+    private fun String.isTimingOrConditionClause(): Boolean {
+        val clause = trim().stripPairedBrackets()
+        return CONDITION_SUFFIXES.any { suffix -> clause.length > suffix.length && clause.endsWith(suffix) }
     }
 
     private fun String.leadingClause(): String? {
@@ -306,6 +329,7 @@ internal class TranslationIndexCompiler {
         private val SQUARE_BRACKET_CONTENT = Regex("\\[([^\\[\\]]+)]")
         private val LEADING_BULLET = Regex("^\\s*[-·•]\\s*")
         private val CLAUSE_DELIMITERS = setOf('、', '，', ',', '：', ':')
+        private val CONDITION_SUFFIXES = setOf("時", "前", "後", "場合", "際")
         private const val CANONICAL_GLOSSARY_PRIORITY = 3
     }
 }
@@ -421,13 +445,16 @@ internal class TranslationIndexStore(private val root: Path) {
         return safe.ifBlank { "unknown" }
     }
 
+    /** 统一约定宿主与 native 读取的索引文件和激活指针名称。 */
     companion object {
+        /** 保存当前激活索引绝对路径的原子指针文件名。 */
         const val ACTIVE_POINTER = "active-index.path"
+        /** 每个不可变索引版本目录内的二进制正文文件名。 */
         const val INDEX_FILE = "index.bin"
         private const val MANIFEST_FILE = "manifest.properties"
-        // schema 10 强制重建索引：保留词典内日中相同的名称，防止被 UI 同文异译覆盖。
+        // schema 10 保留词典同文保护；schema 11 重建术语来源、条件与幂等筛选规则。
         // 与 native 端 kIndexSchema 保持同步。
-        private const val INDEX_SCHEMA = 10
+        private const val INDEX_SCHEMA = 11
         private val INDEX_MAGIC = byteArrayOf('L'.code.toByte(), 'Z'.code.toByte(), 'T'.code.toByte(), 'I'.code.toByte(), '1'.code.toByte(), 0)
     }
 }

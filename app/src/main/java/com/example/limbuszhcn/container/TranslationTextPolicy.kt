@@ -48,6 +48,18 @@ internal object TranslationTextPolicy {
         "eventDesc", "subDesc", "successDesc", "failureDesc"
     )
 
+    /** 这些目录承载对白、歌词或语音正文，其中的短句只保留完整文本映射。 */
+    private val NARRATIVE_DIRECTORIES: Set<String> = setOf(
+        "storydata", "bgmlyrics", "personalityvoicedlg", "egovoicedig",
+        "battleannouncerdlg", "battlespeechbubbledlg"
+    )
+
+    /** 同类资源也可能位于语言根目录；按资源族识别，避免误伤 StoryDungeonUI 等界面表。 */
+    private val NARRATIVE_FILE_PREFIXES: Set<String> = setOf(
+        "bgmlyrics_", "voice_", "egovoice", "personalityvoicedlg",
+        "battleannouncerdlg", "battlespeechbubbledlg"
+    )
+
     /**
      * 判断字段能否作为玩家可见文本进入运行时索引。
      *
@@ -63,6 +75,25 @@ internal object TranslationTextPolicy {
      * @return 字段同时属于显示文本与受控术语来源时返回 `true`。
      */
     fun isTermField(field: String): Boolean = field in TERM_FIELDS && isDisplayField(field)
+
+    /**
+     * 判断字段及其资源来源是否允许派生跨页面的短术语。
+     *
+     * 剧情、歌词和语音也使用 `content`，但其中的“子。”等对白不能当成通用术语，
+     * 否则会改写其他译文中的同形片段。限制只影响短术语，完整文本仍正常收集。
+     *
+     * @param path 日文源资源的相对或绝对路径，兼容正斜杠和反斜杠。
+     * @param field 已收集的显示字段名。
+     * @return 字段适合短术语且不属于叙述正文时返回 `true`。
+     */
+    fun isTermSource(path: String, field: String): Boolean {
+        if (!isTermField(field)) return false
+        if (field != "content") return true
+        val segments = path.replace('\\', '/').lowercase().split('/')
+        val narrativeDirectory = segments.dropLast(1).any { it in NARRATIVE_DIRECTORIES }
+        val fileName = segments.last().removePrefix("jp_")
+        return !narrativeDirectory && NARRATIVE_FILE_PREFIXES.none { prefix -> fileName.startsWith(prefix) }
+    }
 
     /**
      * 判断字段是否适合按相同行号派生格式化后的前置条件术语。

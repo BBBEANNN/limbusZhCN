@@ -2,6 +2,7 @@ package com.example.limbuszhcn.container
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import java.io.File
 import java.io.InputStream
 import java.net.URL
@@ -11,15 +12,30 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.Properties
 
+/**
+ * 管理容器所需 microG 的来源、私有暂存和完整性校验，供首次导入与后续启动复用。
+ *
+ * @param context 用于访问宿主私有存储、内置资产和包解析器的应用上下文。
+ */
 class MicrogContainerConfig(private val context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
+    /**
+     * 暂存调用方已选定的外部 APK，并记录供容器安装使用的本地路径。
+     *
+     * @param sourceApks 需要复制到宿主私有目录的 microG APK 文件。
+     */
     fun configure(sourceApks: List<File>) {
         require(sourceApks.isNotEmpty()) { "microG requires at least one APK" }
         val stagedApks = stageMicrogApks(sourceApks)
         saveStagedApks(stagedApks, SOURCE_EXTERNAL)
     }
 
+    /**
+     * 为已有的兼容或调试入口下载并暂存指定 APK。
+     *
+     * @param sourceUrls 由调用方验证并提供的 APK 下载地址列表。
+     */
     fun configureFromUrls(sourceUrls: List<String>) {
         require(sourceUrls.isNotEmpty()) { "microG requires at least one APK URL" }
         val stageDirectory = prepareStageDirectory()
@@ -38,6 +54,11 @@ class MicrogContainerConfig(private val context: Context) {
         saveStagedApks(stagedApks, SOURCE_EXTERNAL)
     }
 
+    /**
+     * 取得可安装的 microG APK，首次使用时从内置资产合并并校验完整安装包。
+     *
+     * @return 已暂存且按文件名排序的 APK 列表。
+     */
     fun microgApks(): List<File> {
         val configured = preferences.getStringSet(KEY_MICROG_APKS, emptySet())
             .orEmpty()
@@ -63,8 +84,18 @@ class MicrogContainerConfig(private val context: Context) {
         return stageBundledMicrogApks(loadBundledManifest())
     }
 
+    /**
+     * 查询旧版 Google 服务配置是否已经完成容器迁移。
+     *
+     * @return 已持久化完成标记时为 true。
+     */
     fun migrationCompleted(): Boolean = preferences.getBoolean(KEY_MIGRATION_COMPLETED, false)
 
+    /**
+     * 汇总配置来源和 APK 可用数量，供诊断页面展示而不暴露路径正文。
+     *
+     * @return 当前配置及迁移状态摘要。
+     */
     fun diagnosticStatus(): MicrogConfigStatus {
         val configuredPaths = preferences.getStringSet(KEY_MICROG_APKS, emptySet()).orEmpty()
         return MicrogConfigStatus(
@@ -76,6 +107,7 @@ class MicrogContainerConfig(private val context: Context) {
         )
     }
 
+    /** 标记容器迁移已经完成，并同步落盘以免下次启动重复执行。 */
     fun markMigrationCompleted() {
         preferences.edit().putBoolean(KEY_MIGRATION_COMPLETED, true).commit()
     }
@@ -148,21 +180,44 @@ class MicrogContainerConfig(private val context: Context) {
     private fun loadBundledManifest(): BundledMicrogManifest =
         context.assets.open(BUNDLED_MANIFEST_ASSET).use(::parseBundledMicrogManifest)
 
+    /**
+     * 按当前系统支持的包信息接口核对内置 APK，旧系统同样必须验证签名。
+     *
+     * @param apk 已完成整包 SHA-256 校验的暂存 APK。
+     * @param entry 内置清单中固定的包名、版本与证书摘要。
+     */
+    @Suppress("DEPRECATION")
     private fun verifyBundledApk(apk: File, entry: BundledMicrogEntry) {
+        // Android 8/8.1 尚无 SigningInfo；用旧接口获取同一 APK 的签名，避免首次启动崩溃。
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            PackageManager.GET_SIGNING_CERTIFICATES
+        } else {
+            PackageManager.GET_SIGNATURES
+        }
         val info = context.packageManager.getPackageArchiveInfo(
             apk.absolutePath,
-            PackageManager.GET_SIGNING_CERTIFICATES
+            flags
         ) ?: error("Unable to parse bundled microG APK: ${entry.assetName}")
         require(info.packageName == entry.packageName) {
             "Bundled microG package mismatch asset=${entry.assetName} expected=${entry.packageName} actual=${info.packageName}"
         }
-        require(info.longVersionCode == entry.versionCode) {
-            "Bundled microG version mismatch package=${entry.packageName} expected=${entry.versionCode} actual=${info.longVersionCode}"
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            info.versionCode.toLong()
         }
-        val signingInfo = requireNotNull(info.signingInfo) {
-            "Bundled microG signing info missing package=${entry.packageName}"
+        require(versionCode == entry.versionCode) {
+            "Bundled microG version mismatch package=${entry.packageName} expected=${entry.versionCode} actual=$versionCode"
         }
-        val certificateDigests = signingInfo.apkContentsSigners.map { signature ->
+        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            requireNotNull(info.signingInfo) {
+                "Bundled microG signing info missing package=${entry.packageName}"
+            }.apkContentsSigners
+        } else {
+            info.signatures
+        }
+        // 两个系统分支使用同一证书摘要检查，缺失签名也必须拒绝安装。
+        val certificateDigests = signatures.orEmpty().map { signature ->
             MessageDigest.getInstance("SHA-256").digest(signature.toByteArray()).toHex()
         }
         require(entry.certificateSha256 in certificateDigests) {
@@ -212,8 +267,11 @@ class MicrogContainerConfig(private val context: Context) {
     }
 
     companion object {
+        /** 保存 Google 服务容器配置的宿主私有偏好文件名。 */
         const val PREFERENCES_NAME = "limbus_google_auth"
+        /** 已暂存的 microG APK 绝对路径集合键。 */
         const val KEY_MICROG_APKS = "microg_apks"
+        /** APK 来源标识键，用于区分内置资源与已有外部配置。 */
         const val KEY_SOURCE = "microg_source"
         private const val KEY_MIGRATION_COMPLETED = "migration_completed"
         private const val MICROG_STAGE_DIRECTORY = "container-google/microg"
@@ -230,6 +288,14 @@ internal data class BundledMicrogManifest(
     val entries: List<BundledMicrogEntry>
 )
 
+/**
+ * 向诊断界面提供 microG 配置摘要，不包含 APK 内容或敏感设置。
+ *
+ * @property source 当前 APK 配置来源标识。
+ * @property configuredApkCount 已记录的 APK 路径数量。
+ * @property availableApkCount 当前仍可读取的 APK 数量。
+ * @property migrationCompleted 旧配置是否已完成容器迁移。
+ */
 data class MicrogConfigStatus(
     val source: String,
     val configuredApkCount: Int,

@@ -23,9 +23,9 @@ android {
         // VirtualApp 库自身最低支持 API 23，但应用使用了 java.time，因此安全下限设为 API 26。
         minSdk = 26
         targetSdk = 35
-        // v1.4 继续以下载汉化包为唯一译名来源，并统一修复中文字体与人格卡布局。
-        versionCode = 6
-        versionName = "1.5"
+        // 正式版提高安装版本，确保 1.5 测试构建可识别自身更新；译名仍只来自公开汉化包。
+        versionCode = 7
+        versionName = "1.5.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -5,6 +5,11 @@
 
 namespace limbus_text_layout {
 
+// 中文材质独立维护描边参数，不继承日文材质的图集、字重或膨胀值。
+constexpr float kChineseOutlineWidth = 0.12f;
+// TMP 的描边会向内覆盖字面；等宽膨胀抵消这部分覆盖，将黑边移到原轮廓外。
+constexpr float kChineseFaceDilate = kChineseOutlineWidth;
+
 // TMP's current fontSize can already be the result of a previous auto-size pass.
 inline float configured_font_size(float rendered_size, bool auto_sizing,
                                   bool has_maximum, float maximum) {

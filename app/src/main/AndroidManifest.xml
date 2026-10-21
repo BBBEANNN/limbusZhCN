@@ -17,6 +17,10 @@
     </queries>
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 自更新由系统安装器完成；首次安装新版仍需用户允许安装来源并确认安装。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- 容器可能以宿主身份转发前台服务通知；声明权限以兼容 Android 13 及以上。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".LimbusZhCNApplication"
@@ -29,6 +33,16 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.LimbusZhCN"
         tools:targetApi="31">
+        <!-- 仅向系统安装器临时授权读取汉化器自身的更新 APK。 -->
+        <provider
+            android:name=".update.AppUpdateFileProvider"
+            android:authorities="${applicationId}.selfupdate.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/app_update_paths" />
+        </provider>
         <activity
             android:name=".MainActivity"
             android:exported="true"

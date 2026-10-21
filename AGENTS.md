@@ -29,7 +29,7 @@ flowchart LR
     Storage --> Collector[TranslationRecordCollector]
     Installer --> Collector
     Collector --> Compiler[TranslationIndexCompiler]
-    Compiler --> Index[宿主私有 schema 10 索引]
+    Compiler --> Index[宿主私有 schema 11 索引]
     Index --> Native[IL2CPP 文本与 TMP 接管]
     Native --> VA
     UI --> Transfer[GameResourceTransfer]
@@ -94,7 +94,7 @@ flowchart LR
   `Rewrite Limbus GMS GetServiceRequest`,随后仍可进入 `PlayDone`。其中
   `libcovault-appsec.so +0x4e564` 的 `SIGILL` 被放行后游戏继续运行,不得把它单独作为
   GMS broker 修复失败的判据。Android 13/MIUI 设备仍需用相同四条日志复测。
-- 运行时文本索引为日语单源 schema 10，编译端/native 必须版本一致并同步显示字段。
+- 运行时文本索引为日语单源 schema 11，编译端/native 必须版本一致并同步显示字段。
   除 `story/relatedChapterText/openConditionNumber` 外，还覆盖经审查的 `speaker`、
   `displayName`、`statText`、`goalDescription1..8`；拒绝 Unicode 替换字符和非法控制字符。
   接管必须在访客配置阶段挂接 `dlsym`,只把 Unity 请求的 `il2cpp_init`
@@ -107,8 +107,9 @@ flowchart LR
   组件复用于非托管文本时必须恢复原主字体,不得按“含非 ASCII”泛化替换所有 TMP。
   内置主字体使用 Sarasa Gothic SC Regular,动态 SDF 图集必须使用 4096x4096,1024x1024
   已实测会在技能页加载约千条文本后丢失旧字形。切换中文字体时须保存并恢复组件原字体
-  与材质；中文 SDF 统一使用 `_OutlineWidth=0.12`、不透明黑边和 `OUTLINE_ON`，不得复制
-  日文材质的图集或膨胀参数。原组件启用自动字号时，以 `fontSizeMax` 保存配置基准，
+  与材质；中文 SDF 统一使用 `_OutlineWidth=0.12`、不透明黑边和 `OUTLINE_ON`，同时在
+  中文自身材质设置等宽 `_FaceDilate=0.12`，补偿 TMP 描边向内覆盖的部分，保留原字面。
+  不得复制日文材质的图集或膨胀参数。原组件启用自动字号时，以 `fontSizeMax` 保存配置基准，
   不得把已缩小的渲染字号当成基准；不得按字符数粗略缩字或把长文本强制改成单行。
   保留原文换行与 `<br>`。已汉化的普通多行文本须做有限行距
   补偿,带显式 `line-height` 的文本不得重复补偿。字体创建或 fallback 注册失败时必须

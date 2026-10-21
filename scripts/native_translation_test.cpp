@@ -162,6 +162,32 @@ int main(int argc, char **argv) {
     check(multiline_spacing(2, 32, false) > 2,
           "ordinary multiline text has a spacing floor");
     int checks = 16;
+    std::array<std::string, 6> battle_names{{"SkillNameText", "SkillNameField",
+        "[Script]SkillAndCoinUI", "active", "[Script]UnitSkillInfoUI", "[Script]UnitActionUI"}};
+    check(is_battle_skill_hierarchy(battle_names), "observed battle skill name is selected");
+    ++checks;
+    for (size_t depth = 0; depth < battle_names.size(); ++depth) {
+        auto other = battle_names;
+        other[depth] = depth == 0 ? "SkillDescText" : "SkillDetailPanel";
+        check(!is_battle_skill_hierarchy(other), "description and non-battle hierarchy excluded");
+        ++checks;
+    }
+    for (float ratio : {0.25f, 0.5f, 0.9f}) {
+        for (float scale : {1.0f, 4.0f, 16.0f}) {
+            for (bool bold : {false, true}) {
+                const float old_weight = bold ? 0.75f / 4.0f : 0.0f;
+                const float new_weight = bold ? kBattleSkillBoldWeight / 4.0f : 0.0f;
+                const float old_face = (0.5f - (old_weight + kChineseFaceDilate -
+                    kChineseOutlineWidth) * ratio / 2.0f) * scale - 0.5f;
+                const float new_face = (0.5f - (new_weight + kBattleSkillFaceDilate -
+                    kBattleSkillOutlineWidth) * ratio / 2.0f) * scale - 0.5f;
+                check(new_face > old_face, "battle white face narrows with and without Bold");
+                check(kBattleSkillOutlineWidth * ratio * scale >
+                    kChineseOutlineWidth * ratio * scale, "battle black border grows at every scale");
+                checks += 2;
+            }
+        }
+    }
     // 用 TMP 官方 shader 的阈值公式检验生产材质参数：填充边界必须保持，黑边只能外扩。
     // 覆盖不同图集比例和渲染尺度，避免仅验证某个字号下两个常量碰巧相等。
     for (float ratio : {1.0f, 0.5f, 0.25f}) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cmath>
 #include <string>
 
@@ -9,6 +10,16 @@ namespace limbus_text_layout {
 constexpr float kChineseOutlineWidth = 0.12f;
 // TMP 的描边会向内覆盖字面；等宽膨胀抵消这部分覆盖，将黑边移到原轮廓外。
 constexpr float kChineseFaceDilate = kChineseOutlineWidth;
+
+constexpr float kBattleSkillOutlineWidth = 0.14f;
+constexpr float kBattleSkillFaceDilate = 0.10f;
+constexpr float kBattleSkillBoldWeight = 0.20f;
+
+inline bool is_battle_skill_hierarchy(const std::array<std::string, 6> &names) {
+    return names == std::array<std::string, 6>{{"SkillNameText", "SkillNameField",
+            "[Script]SkillAndCoinUI", "active", "[Script]UnitSkillInfoUI",
+            "[Script]UnitActionUI"}};
+}
 
 // TMP's current fontSize can already be the result of a previous auto-size pass.
 inline float configured_font_size(float rendered_size, bool auto_sizing,

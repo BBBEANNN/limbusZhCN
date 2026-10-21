@@ -14,6 +14,7 @@
 #include <limits.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/system_properties.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -74,6 +75,10 @@ std::unordered_map<void *, uintptr_t> g_translated_string_origins;
 struct TmpComponentState {
     void *font = nullptr;
     void *shared_material = nullptr;
+    int32_t font_style = 0;
+    bool has_font_style = false;
+    int32_t font_weight = 0;
+    bool has_font_weight = false;
     float line_spacing = 0.0f;
     bool has_line_spacing = false;
     float font_size = 0.0f;
@@ -179,6 +184,8 @@ const void *g_tmp_font_get_material_info = nullptr;
 const void *g_tmp_get_font_material_info = nullptr;
 const void *g_tmp_get_shared_material_info = nullptr;
 const void *g_tmp_set_shared_material_info = nullptr;
+const void *g_tmp_get_font_style_info = nullptr;
+const void *g_tmp_get_font_weight_info = nullptr;
 const void *g_tmp_get_line_spacing_info = nullptr;
 const void *g_tmp_set_line_spacing_info = nullptr;
 const void *g_tmp_get_font_size_info = nullptr;
@@ -215,7 +222,13 @@ const void *g_rect_transform_get_rect_info = nullptr;
 const void *g_object_get_name_info = nullptr;
 const void *g_component_get_transform_info = nullptr;
 const void *g_transform_get_parent_info = nullptr;
+void *(*g_object_new)(void *) = nullptr;
+gchandle_new_weakref_fn g_gchandle_new = nullptr;
+void *g_material_class = nullptr;
+const void *g_material_copy_constructor = nullptr;
+uintptr_t g_battle_skill_material_handle = 0;
 const void *g_material_get_float_info = nullptr;
+const void *g_material_has_property_info = nullptr;
 const void *g_material_set_float_info = nullptr;
 const void *g_material_get_color_info = nullptr;
 const void *g_material_set_color_info = nullptr;
@@ -1366,6 +1379,10 @@ TmpComponentState capture_tmp_component_state(void *instance, void *font) {
     TmpComponentState candidate;
     candidate.font = font;
     candidate.shared_material = invoke_object_getter(g_tmp_get_shared_material_info, instance);
+    candidate.has_font_style = invoke_int_getter(
+            g_tmp_get_font_style_info, instance, &candidate.font_style);
+    candidate.has_font_weight = invoke_int_getter(
+            g_tmp_get_font_weight_info, instance, &candidate.font_weight);
     candidate.has_line_spacing = invoke_float_getter(
             g_tmp_get_line_spacing_info, instance, &candidate.line_spacing);
     candidate.has_font_size = invoke_float_getter(
@@ -1401,6 +1418,214 @@ bool find_tmp_component_state(void *instance, TmpComponentState *state) {
     return found;
 }
 
+// 诊断仅记录 Unity 对象的短 ASCII 标识，过滤 URL、邮箱、长令牌和控制字符。
+std::string tmp_diagnostic_object_name(void *instance) {
+    const std::string name = read_unity_object_name(instance);
+    if (name.empty()) return "<unnamed>";
+    if (name.size() > 96) return "<long-name>";
+    size_t alphanumeric_run = 0;
+    std::string safe;
+    for (unsigned char value : name) {
+        const bool alphanumeric = (value >= 'a' && value <= 'z') ||
+                (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9');
+        alphanumeric_run = alphanumeric ? alphanumeric_run + 1 : 0;
+        if (alphanumeric_run >= 40 || value == '@' || value == ':' || value == '/' ||
+            value == '\\' || value == '=' || value < 0x20 || value == 0x7f) {
+            return "<redacted-name>";
+        }
+        if (value >= 0x80) {
+            if (safe.empty() || safe.back() != '?') safe += '?';
+        } else {
+            safe += static_cast<char>(value);
+        }
+    }
+    return safe;
+}
+
+bool read_tmp_diagnostic_material_float(void *material, const char *property, float *value) {
+    if (material == nullptr || g_material_has_property_info == nullptr ||
+        g_material_get_float_info == nullptr || g_runtime_invoke == nullptr ||
+        g_object_unbox == nullptr || value == nullptr) {
+        return false;
+    }
+    void *name = new_managed_string(property);
+    if (name == nullptr) return false;
+    void *args[] = {name};
+    void *exception = nullptr;
+    void *boxed = g_runtime_invoke(g_material_has_property_info, material, args, &exception);
+    void *unboxed = exception == nullptr && boxed != nullptr ? g_object_unbox(boxed) : nullptr;
+    uint8_t present = 0;
+    if (unboxed != nullptr) memcpy(&present, unboxed, sizeof(present));
+    if (!present) return false;
+    exception = nullptr;
+    boxed = g_runtime_invoke(g_material_get_float_info, material, args, &exception);
+    unboxed = exception == nullptr && boxed != nullptr ? g_object_unbox(boxed) : nullptr;
+    if (unboxed == nullptr) return false;
+    memcpy(value, unboxed, sizeof(*value));
+    return true;
+}
+
+void log_tmp_diagnostic_material(char session, size_t identity, const char *phase,
+                                 const char *role, void *font, void *material) {
+    static const char *const properties[] = {
+            "_FaceDilate", "_OutlineWidth", "_OutlineSoftness", "_WeightNormal",
+            "_WeightBold", "_GradientScale", "_ScaleRatioA"
+    };
+    float values[7] = {};
+    unsigned int valid = 0;
+    for (size_t index = 0; index < 7; ++index) {
+        if (read_tmp_diagnostic_material_float(material, properties[index], &values[index])) {
+            valid |= 1u << index;
+        }
+    }
+    LT_LOGI("TMP style material session=%c id=%zu phase=%s role=%s font=%p fontName=%s"
+            " material=%p materialName=%s valid=0x%x face=%.3f outline=%.3f softness=%.3f"
+            " normal=%.3f bold=%.3f gradient=%.3f ratioA=%.3f",
+            session, identity, phase, role, font, tmp_diagnostic_object_name(font).c_str(),
+            material, tmp_diagnostic_object_name(material).c_str(), valid,
+            values[0], values[1], values[2], values[3], values[4], values[5], values[6]);
+}
+
+void log_tmp_style_metadata(void *instance, bool translated_phase) {
+    if (instance == nullptr) return;
+    // adb shell setprop debug.limbus.tmp_style 1 可在不改 UI 的情况下开启；0 关闭。
+    // 进入战斗后改为 2..9 会开启新的有界采样，避免前面页面占满去重预算。
+    char property[PROP_VALUE_MAX] = {};
+    if (__system_property_get("debug.limbus.tmp_style", property) != 1 ||
+        property[0] < '1' || property[0] > '9') {
+        return;
+    }
+    static char active_session = 0;
+    struct Sample {
+        size_t identity = 0;
+        uint8_t phases = 0;
+    };
+    static std::unordered_map<std::string, Sample> sampled_hierarchies;
+    constexpr size_t kMaxDiagnosticHierarchies = 512;
+    const char session = property[0];
+    pthread_mutex_lock(&g_font_state_lock);
+    if (active_session != session) {
+        active_session = session;
+        sampled_hierarchies.clear();
+    }
+    const bool full = sampled_hierarchies.size() >= kMaxDiagnosticHierarchies;
+    pthread_mutex_unlock(&g_font_state_lock);
+    if (full) return;
+
+    std::string hierarchy = tmp_diagnostic_object_name(instance);
+    void *ancestor = invoke_object_getter(g_component_get_transform_info, instance);
+    for (size_t depth = 0; depth < 8; ++depth) {
+        ancestor = invoke_object_getter(g_transform_get_parent_info, ancestor);
+        if (ancestor == nullptr) break;
+        hierarchy += " <- ";
+        hierarchy += tmp_diagnostic_object_name(ancestor);
+    }
+    int32_t style = 0;
+    int32_t weight = 0;
+    const bool has_style = invoke_int_getter(g_tmp_get_font_style_info, instance, &style);
+    const bool has_weight = invoke_int_getter(g_tmp_get_font_weight_info, instance, &weight);
+    const std::string key = hierarchy + "|" + std::to_string(style) + "|" +
+            std::to_string(weight);
+    const uint8_t phase_bit = translated_phase ? 2 : 1;
+    size_t identity = 0;
+    bool emit = false;
+    pthread_mutex_lock(&g_font_state_lock);
+    if (active_session == session && sampled_hierarchies.size() < kMaxDiagnosticHierarchies) {
+        Sample candidate;
+        candidate.identity = sampled_hierarchies.size() + 1;
+        auto inserted = sampled_hierarchies.emplace(key, candidate);
+        if ((inserted.first->second.phases & phase_bit) == 0) {
+            inserted.first->second.phases |= phase_bit;
+            identity = inserted.first->second.identity;
+            emit = true;
+        }
+    }
+    pthread_mutex_unlock(&g_font_state_lock);
+    if (!emit) return;
+
+    void *font = invoke_object_getter(g_tmp_get_font_info, instance);
+    // fontMaterial getter 会创建材质实例；诊断只读 fontSharedMaterial，不触发该副作用。
+    void *material = invoke_object_getter(g_tmp_get_shared_material_info, instance);
+    TmpComponentState original;
+    const bool saved = find_tmp_component_state(instance, &original);
+    if (!saved) {
+        original.font = font;
+        original.shared_material = material;
+        original.font_style = style;
+        original.has_font_style = has_style;
+        original.font_weight = weight;
+        original.has_font_weight = has_weight;
+    }
+    ComponentRect rect = read_component_rect(instance, g_tmp_get_rect_transform_info);
+    float font_size = 0.0f;
+    float minimum = 0.0f;
+    float maximum = 0.0f;
+    bool auto_sizing = false;
+    bool wrapping = false;
+    invoke_float_getter(g_tmp_get_font_size_info, instance, &font_size);
+    invoke_float_getter(g_tmp_get_font_size_min_info, instance, &minimum);
+    invoke_float_getter(g_tmp_get_font_size_max_info, instance, &maximum);
+    invoke_bool_getter(g_tmp_get_auto_sizing_info, instance, &auto_sizing);
+    invoke_bool_getter(g_tmp_get_word_wrapping_info, instance, &wrapping);
+    const char *phase = translated_phase ? "translated" : "input";
+    LT_LOGI("TMP style metadata session=%c id=%zu phase=%s object=%p saved=%d"
+            " style=%d/%d weight=%d/%d originalStyle=%d/%d originalWeight=%d/%d"
+            " rect=%.1fx%.1f size=%.2f min=%.2f max=%.2f auto=%d wrap=%d hierarchy=%s",
+            session, identity, phase, instance, saved, style, has_style, weight, has_weight,
+            original.font_style, original.has_font_style,
+            original.font_weight, original.has_font_weight,
+            rect.width, rect.height, font_size, minimum, maximum, auto_sizing, wrapping,
+            hierarchy.c_str());
+    log_tmp_diagnostic_material(session, identity, phase, "current", font, material);
+    if (original.font != font || original.shared_material != material) {
+        log_tmp_diagnostic_material(session, identity, phase, "original",
+                                    original.font, original.shared_material);
+    }
+}
+
+bool is_battle_skill_name(void *instance) {
+    if (read_unity_object_name(instance) != "SkillNameText") return false;
+    std::array<std::string, 6> names;
+    names[0] = "SkillNameText";
+    void *ancestor = invoke_object_getter(g_component_get_transform_info, instance);
+    for (size_t depth = 1; depth < names.size(); ++depth) {
+        ancestor = invoke_object_getter(g_transform_get_parent_info, ancestor);
+        if (ancestor == nullptr) return false;
+        names[depth] = read_unity_object_name(ancestor);
+    }
+    return limbus_text_layout::is_battle_skill_hierarchy(names);
+}
+
+void *battle_skill_material(void *base) {
+    if (g_battle_skill_material_handle != 0)
+        return g_gchandle_get_target(g_battle_skill_material_handle);
+    if (base == nullptr || g_object_new == nullptr || g_gchandle_new == nullptr ||
+        g_gchandle_get_target == nullptr || g_material_copy_constructor == nullptr ||
+        g_material_set_float_info == nullptr) return base;
+    void *material = g_object_new(g_material_class);
+    if (material == nullptr) return base;
+    void *exception = nullptr;
+    void *args[] = {base};
+    g_runtime_invoke(g_material_copy_constructor, material, args, &exception);
+    if (exception != nullptr) return base;
+    // One process-lifetime material, cloned only from the Chinese atlas material.
+    auto handle = g_gchandle_new(material, false);
+    if (handle == 0) return base;
+    MaterialOutlineStyle outline = read_material_outline(base);
+    outline.width = limbus_text_layout::kBattleSkillOutlineWidth;
+    outline.face_dilate = limbus_text_layout::kBattleSkillFaceDilate;
+    outline.has_width = outline.has_face_dilate = true;
+    apply_material_outline(material, outline);
+    void *bold_name = new_managed_string("_WeightBold");
+    float bold_weight = limbus_text_layout::kBattleSkillBoldWeight;
+    void *bold_args[] = {bold_name, &bold_weight};
+    g_runtime_invoke(g_material_set_float_info, material, bold_args, &exception);
+    if (exception != nullptr) { g_gchandle_free(handle); return base; }
+    g_battle_skill_material_handle = handle;
+    LT_LOGI("Battle skill material ready outline=0.140 face=0.100 bold=0.200");
+    return material;
+}
+
 void *translated_tmp_material(void *instance, void *requested_material) {
     TmpComponentState state;
     if (instance == nullptr || !find_tmp_component_state(instance, &state) ||
@@ -1412,6 +1637,8 @@ void *translated_tmp_material(void *instance, void *requested_material) {
     // 材质仍指向旧图集时，即使文本和中文字体正确，也会随机显示成黑块、黄块或碎字。
     void *font_material = invoke_object_getter(
             g_tmp_font_get_material_info, g_tmp_font_asset);
+    if (font_material != nullptr && is_battle_skill_name(instance))
+        font_material = battle_skill_material(font_material);
     return font_material == nullptr ? requested_material : font_material;
 }
 
@@ -1699,6 +1926,7 @@ void *apply_tmp_component_layout_markup(void *instance, void *managed_text) {
 }
 
 void *prepare_tmp_text(void *instance, void *managed_text) {
+    log_tmp_style_metadata(instance, false);
     void *replacement = managed_text;
     if (instance != nullptr && managed_text != nullptr && g_string_length != nullptr &&
         g_string_chars != nullptr && g_string_new_utf16 != nullptr) {
@@ -1733,7 +1961,8 @@ void *prepare_tmp_text(void *instance, void *managed_text) {
                             g_tmp_font_get_material_info, g_tmp_font_asset);
                     if (font_material != nullptr) {
                         invoke_object_setter(
-                                g_tmp_set_shared_material_info, instance, font_material);
+                                g_tmp_set_shared_material_info, instance,
+                                translated_tmp_material(instance, font_material));
                     }
                     uint64_t switches = g_tmp_primary_font_switches.fetch_add(
                             1, std::memory_order_relaxed) + 1;
@@ -1767,6 +1996,7 @@ void finalize_tmp_text(void *instance, void *managed_text) {
         // 必须在原始 set_text/SetText 完成后再应用字号和换行；否则游戏 setter 会用
         // 旧文本重新计算布局，导致我们设置的自动缩放没有真正处理新中文。
         apply_translated_tmp_style(instance, managed_text, state);
+        log_tmp_style_metadata(instance, true);
     }
 }
 
@@ -2433,6 +2663,10 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
             class_get_method_from_name(tmp_text_class, "get_fontSharedMaterial", 0);
     const void *tmp_set_shared_material_method = tmp_text_class == nullptr ? nullptr :
             class_get_method_from_name(tmp_text_class, "set_fontSharedMaterial", 1);
+    const void *tmp_get_font_style_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "get_fontStyle", 0);
+    const void *tmp_get_font_weight_method = tmp_text_class == nullptr ? nullptr :
+            class_get_method_from_name(tmp_text_class, "get_fontWeight", 0);
     const void *tmp_get_line_spacing_method = tmp_text_class == nullptr ? nullptr :
             class_get_method_from_name(tmp_text_class, "get_lineSpacing", 0);
     const void *tmp_set_line_spacing_method = tmp_text_class == nullptr ? nullptr :
@@ -2507,6 +2741,8 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
             class_get_method_from_name(transform_class, "get_parent", 0);
     const void *material_get_float_method = find_method_by_signature(
             material_class, "GetFloat", "System.String");
+    const void *material_has_property_method = find_method_by_signature(
+            material_class, "HasProperty", "System.String");
     const void *material_set_float_method = find_method_by_signature(
             material_class, "SetFloat", "System.String,System.Single");
     const void *material_get_color_method = find_method_by_signature(
@@ -2548,6 +2784,8 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
     LT_LOGI("Unity hierarchy methods name=%p transform=%p parent=%p",
             object_get_name_method, component_get_transform_method,
             transform_get_parent_method);
+    LT_LOGI("TMP diagnostic getters fontStyle=%p fontWeight=%p materialHasProperty=%p",
+            tmp_get_font_style_method, tmp_get_font_weight_method, material_has_property_method);
     if (tmp_font_class != nullptr && create_tmp_font_method == nullptr) {
         create_tmp_font_method = class_get_method_from_name(tmp_font_class, "CreateFontAsset", 9);
     }
@@ -2583,6 +2821,11 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
         g_string_length = string_length;
         g_string_chars = string_chars;
         g_string_new_utf16 = string_new_utf16;
+        g_object_new = resolver.resolve<decltype(g_object_new)>("il2cpp_object_new");
+        g_gchandle_new = resolver.resolve<gchandle_new_weakref_fn>("il2cpp_gchandle_new");
+        g_material_class = material_class;
+        g_material_copy_constructor = find_method_by_signature(
+                material_class, ".ctor", "UnityEngine.Material");
         g_gchandle_new_weakref = gchandle_new_weakref;
         g_gchandle_get_target = gchandle_get_target;
         g_gchandle_free = gchandle_free;
@@ -2611,6 +2854,8 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
         g_tmp_get_font_material_info = tmp_get_font_material_method;
         g_tmp_get_shared_material_info = tmp_get_shared_material_method;
         g_tmp_set_shared_material_info = tmp_set_shared_material_method;
+        g_tmp_get_font_style_info = tmp_get_font_style_method;
+        g_tmp_get_font_weight_info = tmp_get_font_weight_method;
         g_tmp_get_line_spacing_info = tmp_get_line_spacing_method;
         g_tmp_set_line_spacing_info = tmp_set_line_spacing_method;
         g_tmp_get_font_size_info = tmp_get_font_size_method;
@@ -2648,6 +2893,7 @@ bool report_il2cpp_resolver(const MappedElfResolver &resolver, bool query_domain
         g_component_get_transform_info = component_get_transform_method;
         g_transform_get_parent_info = transform_get_parent_method;
         g_material_get_float_info = material_get_float_method;
+        g_material_has_property_info = material_has_property_method;
         g_material_set_float_info = material_set_float_method;
         g_material_get_color_info = material_get_color_method;
         g_material_set_color_info = material_set_color_method;

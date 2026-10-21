@@ -13,6 +13,10 @@ local.properties
 # Claude Code 本地状态
 .claude/
 
+# Codely CLI 本地状态与记忆（含本机代理/账号信息）
+.codely-cli/
+CODELY.md
+
 # 译文制作产物（不进入仓库）
 /baseline/
 /out/

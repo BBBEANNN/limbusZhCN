@@ -21,10 +21,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
-import com.example.limbuszhcn.BuildConfig
 
 /**
- * 展示汉化器版本，并仅在宿主可交互且游戏准备任务结束后续接 Android 系统安装流程。
+ * 展示实际安装版本和手动检查入口，仅在玩家点击安装后续接 Android 系统安装流程。
  *
  * @param model 跨配置变更保留的更新状态。
  * @param hostBusy 游戏同步、汉化安装或资源迁移是否正在执行。
@@ -34,7 +33,7 @@ internal fun AppUpdateCard(model: AppUpdateViewModel, hostBusy: Boolean) {
     val context = LocalContext.current
     val state = model.state
     val installer = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        // 成功覆盖会结束旧进程；能返回此处时，保留重试入口且不自动再次弹出安装。
+        // 返回后先核对系统实际版本；已安装相同/更高版本时移除旧按钮，不重放安装请求。
         model.finishExternalFlow("已返回汉化器；如未完成更新，可点击安装新版")
     }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -42,7 +41,7 @@ internal fun AppUpdateCard(model: AppUpdateViewModel, hostBusy: Boolean) {
         if (context.packageManager.canRequestPackageInstalls()) model.requestInstallation()
     }
 
-    LaunchedEffect(state.automaticInstallPending, model.hostResumed, hostBusy) {
+    LaunchedEffect(state.installationRequested, model.hostResumed, hostBusy) {
         if (hostBusy || !model.hostResumed) return@LaunchedEffect
         val update = model.consumeInstallationRequest() ?: return@LaunchedEffect
         runCatching {
@@ -68,17 +67,17 @@ internal fun AppUpdateCard(model: AppUpdateViewModel, hostBusy: Boolean) {
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("汉化器 v${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.titleMedium)
+            Text("汉化器 v${model.installedVersionName}", style = MaterialTheme.typography.titleMedium)
             Text(state.message, style = MaterialTheme.typography.bodyMedium)
             if (state.working) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            Text("发现新版会自动下载，最后需在系统界面确认安装。", style = MaterialTheme.typography.bodySmall)
+            Text("点击检查后查询并下载新版，再点击安装按钮确认。", style = MaterialTheme.typography.bodySmall)
             if (state.update != null) {
                 OutlinedButton(onClick = model::requestInstallation, enabled = !hostBusy && !state.working) {
                     Text("安装新版 ${state.update.versionName}")
                 }
             }
             OutlinedButton(onClick = model::checkForUpdates, enabled = !hostBusy && !state.working) {
-                Text("重新检查汉化器版本")
+                Text("检查更新")
             }
         }
     }

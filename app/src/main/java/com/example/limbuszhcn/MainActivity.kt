@@ -468,13 +468,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** 宿主进入前台时检查自身版本；不在 Application 或游戏访客进程内执行。 */
-    override fun onStart() {
-        super.onStart()
-        appUpdateModel.onHostStarted()
-    }
-
-    /** 恢复交互后允许接收下载完成产生的安装请求。 */
+    /** 恢复交互后仅核对本地安装状态，不联网检查或自动请求安装。 */
     override fun onResume() {
         super.onResume()
         appUpdateModel.updateHostResumed(true)
@@ -484,12 +478,6 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         appUpdateModel.updateHostResumed(false)
         super.onPause()
-    }
-
-    /** 记录真正的后台切换，使下次打开时重新自检且旋转屏幕不重复下载。 */
-    override fun onStop() {
-        appUpdateModel.onHostStopped(isChangingConfigurations)
-        super.onStop()
     }
 
     /**

@@ -27,10 +27,10 @@ internal data class AppUpdateRelease(
  * 集中约束汉化器自身更新的官方来源与数字版本规则，不依赖 Android 环境。
  */
 internal object AppUpdatePolicy {
-    /** 每次打开汉化器查询的唯一官方稳定版元数据入口。 */
+    /** 玩家手动检查汉化器更新时使用的唯一官方稳定版元数据入口。 */
     const val RELEASE_API_URL = "https://api.github.com/repos/BBBEANNN/limbusZhCN/releases/latest"
 
-    /** 自动下载必须严格小于此上限，防止异常响应耗尽手机存储。 */
+    /** 更新包下载必须严格小于此上限，防止异常响应耗尽手机存储。 */
     const val MAX_APK_BYTES = 512L * 1024 * 1024
 
     private const val RELEASE_ROOT = "https://github.com/BBBEANNN/limbusZhCN/releases"
@@ -111,6 +111,23 @@ internal object AppUpdatePolicy {
         }
         return false
     }
+
+    /**
+     * 同时核对实际显示版本和安装版本号，防止旧进程或缓存再次安装系统已有的同版 APK。
+     *
+     * @param candidateVersionName 候选 APK 经系统解析后的显示版本名称。
+     * @param candidateVersionCode 候选 APK 经系统解析后的完整安装版本号。
+     * @param installedVersionName PackageManager 本轮读取的实际已安装显示版本名称。
+     * @param installedVersionCode PackageManager 本轮读取的实际已安装完整版本号。
+     * @return 两项版本都严格递增时为真；相同、较旧或版本号不递增时为假。
+     */
+    fun isInstallableUpgrade(
+        candidateVersionName: String,
+        candidateVersionCode: Long,
+        installedVersionName: String,
+        installedVersionCode: Long
+    ): Boolean = candidateVersionCode > installedVersionCode
+        && isNewerVersion(candidateVersionName, installedVersionName)
 
     /**
      * 将 APK 地址限制在官方仓库、当前标签与确切文件名，重定向由 HTTP 层另行约束。

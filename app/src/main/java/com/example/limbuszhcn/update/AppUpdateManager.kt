@@ -27,7 +27,7 @@ internal data class PreparedAppUpdate(
 )
 
 /**
- * 每次打开时检查官方汉化器版本，下载和验证同签名升级包供系统安装器安装。
+ * 按玩家请求检查官方汉化器版本，下载和验证同签名升级包供系统安装器安装。
  *
  * @param context 获取宿主私有缓存、当前包信息和 Android 包解析服务的上下文。
  * @param transport 可替换的公开 GitHub 传输实现，不携带 Token 或账号信息。
@@ -52,22 +52,30 @@ internal class AppUpdateManager(
         checkInterrupted()
         onProgress("正在检查汉化器版本…")
         val release = fetchRelease()
-        if (!AppUpdatePolicy.isNewerVersion(release.versionName, BuildConfig.VERSION_NAME)) return@withCacheLock null
+        // BuildConfig 版本常量可能已被旧调用点内联；始终使用系统当前安装信息判定更新。
+        if (!AppUpdatePolicy.isNewerVersion(release.versionName, installedVersionName())) return@withCacheLock null
         if (!updateDirectory.isDirectory && !updateDirectory.mkdirs()) {
             throw IOException("无法创建汉化器更新缓存目录")
         }
         // 每次复用仍核对整包与签名，防止上次未完成的下载或损坏缓存进入安装界面。
         if (updateFile.isFile) {
-            try {
+            val cached = try {
                 val hash = verifyReleaseFile(updateFile, release)
-                val prepared = inspectApk(updateFile, release.versionName)
-                rememberPrepared(prepared, hash)
-                onProgress("汉化器 ${prepared.versionName} 已准备好")
-                return@withCacheLock prepared
+                inspectApk(updateFile, release.versionName) to hash
             } catch (error: InterruptedIOException) {
                 throw error
             } catch (_: Exception) {
                 // 不立即删除旧缓存；新文件完成校验后再原子替换，下载失败可保留原有文件。
+                null
+            }
+            if (cached != null) {
+                val (prepared, hash) = cached
+                // 同版不是损坏缓存，直接结束检查，不能落入异常分支再次下载同一个 APK。
+                // 系统版本读取异常也向上报告，不把安装状态不明误判成需要重下。
+                if (!isUpdateNewerThanInstalled(prepared)) return@withCacheLock null
+                rememberPrepared(prepared, hash)
+                onProgress("汉化器 ${prepared.versionName} 已准备好")
+                return@withCacheLock prepared
             }
         }
         val available = updateDirectory.usableSpace
@@ -85,6 +93,8 @@ internal class AppUpdateManager(
             // 同目录重命名保证 FileProvider 只会看到完成校验后的完整 APK。
             if (!temporary.renameTo(updateFile)) throw IOException("无法保存已校验的汉化器更新包")
             val prepared = inspected.copy(file = updateFile)
+            // 下载期间可能已在别处完成升级；保留验证后的缓存，清空本次待安装会话。
+            if (!isUpdateNewerThanInstalled(prepared)) return@withCacheLock null
             rememberPrepared(prepared, hash)
             onProgress("汉化器 ${prepared.versionName} 已准备好")
             return@withCacheLock prepared
@@ -97,8 +107,14 @@ internal class AppUpdateManager(
      * 在跳转系统安装器前重新核对文件、签名与版本，防止等待权限授权期间缓存失效。
      *
      * @param update 当前管理器先前准备并返回的更新包。
+     * @return 文件仍有效且严格高于系统当前版本时为真；已安装同版或更高时清除会话并返回假。
      */
-    fun validatePreparedUpdate(update: PreparedAppUpdate): Unit = withCacheLock {
+    fun validatePreparedUpdate(update: PreparedAppUpdate): Boolean = withCacheLock {
+        // 权限设置或安装界面可能停留较久；已完成的更新不再进入文件校验和安装流程。
+        if (!isUpdateNewerThanInstalled(update)) {
+            preparedIntegrity = null
+            return@withCacheLock false
+        }
         val integrity = preparedIntegrity ?: throw IOException("更新包状态已变化，请重新检查汉化器版本")
         if (update.file.canonicalFile != updateFile.canonicalFile || update != integrity.update
             || !update.file.isFile || update.file.length() != integrity.sizeBytes
@@ -106,6 +122,35 @@ internal class AppUpdateManager(
         if (fileSha256(update.file) != integrity.sha256) throw IOException("汉化器更新包校验失败，请重新下载")
         val current = inspectApk(update.file, update.versionName)
         if (current != update) throw IOException("汉化器更新包版本已变化，请重新检查更新")
+        // 完整哈希读取期间同样可能发生安装变化，因此交付安装器前再读一次系统状态。
+        if (!isUpdateNewerThanInstalled(current)) {
+            preparedIntegrity = null
+            return@withCacheLock false
+        }
+        true
+    }
+
+    /**
+     * 读取 Android 当前安装的汉化器显示版本，不回退到可能过期的编译期常量。
+     *
+     * @return PackageManager 当前报告的非空版本名称；读取失败时抛出异常供界面显示未知状态。
+     */
+    fun installedVersionName(): String = packageVersionName(readInstalledPackageInfo())
+
+    /**
+     * 只用本地实际安装信息判断待安装 APK 是否仍属于升级，不联网也不读取 APK 正文。
+     *
+     * @param update 先前准备的 APK 版本信息。
+     * @return 版本名称和安装版本号均高于当前安装时为真，同版或任一维度较低时为假。
+     */
+    fun isUpdateNewerThanInstalled(update: PreparedAppUpdate): Boolean {
+        val installed = readInstalledPackageInfo()
+        return AppUpdatePolicy.isInstallableUpgrade(
+            candidateVersionName = update.versionName,
+            candidateVersionCode = update.versionCode,
+            installedVersionName = packageVersionName(installed),
+            installedVersionCode = packageVersionCode(installed)
+        )
     }
 
     /**
@@ -214,11 +259,11 @@ internal class AppUpdateManager(
     }
 
     /**
-     * 以 Android 实际解析结果验证包身份、系统要求、版本号和当前证书完整集合。
+     * 以 Android 实际解析结果验证包身份、系统要求、标签版本和当前证书完整集合。
      *
      * @param file 已完成长度和摘要检查的 APK。
      * @param expectedVersion 官方标签对应的数字版本名。
-     * @return 只能覆盖当前汉化器且确实更高版本的更新包信息。
+     * @return 已确认身份与完整性的 APK 信息；是否仍需升级由最新系统安装状态单独判断。
      */
     @Suppress("DEPRECATION")
     private fun inspectApk(file: File, expectedVersion: String): PreparedAppUpdate {
@@ -234,8 +279,7 @@ internal class AppUpdateManager(
         if (archive.packageName != BuildConfig.APPLICATION_ID) throw IOException("更新 APK 不是当前汉化器，已拒绝安装")
         val application = archive.applicationInfo ?: throw IOException("汉化器更新 APK 缺少应用信息")
         if (application.minSdkVersion > Build.VERSION.SDK_INT) throw IOException("此汉化器新版本不支持当前 Android 系统")
-        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) archive.longVersionCode else archive.versionCode.toLong()
-        if (versionCode <= BuildConfig.VERSION_CODE.toLong()) throw IOException("更新 APK 安装版本号未高于当前版本，已拒绝降级")
+        val versionCode = packageVersionCode(archive)
         val versionName = archive.versionName ?: throw IOException("汉化器更新 APK 缺少版本名称")
         val versionMatches = try {
             !AppUpdatePolicy.isNewerVersion(versionName, expectedVersion)
@@ -244,12 +288,47 @@ internal class AppUpdateManager(
             false
         }
         if (!versionMatches) throw IOException("汉化器更新 APK 的实际版本与官方标签不一致")
-        val installed = manager.getPackageInfo(BuildConfig.APPLICATION_ID, flags)
+        val installed = readInstalledPackageInfo(flags)
         // 比较当前签名者全集；不把证书历史或仅有一个共同证书当成完全相同的签名。
         if (signerDigests(archive) != signerDigests(installed)) {
-            throw IOException("更新包签名与当前汉化器不同，无法保留数据直接升级；已停止自动更新")
+            throw IOException("更新包签名与当前汉化器不同，无法保留数据直接升级；已停止安装")
         }
         return PreparedAppUpdate(file, versionName, versionCode)
+    }
+
+    /**
+     * 每次从系统重新读取宿主包信息，避免更新等待期间沿用旧的安装版本快照。
+     *
+     * @param flags 包信息查询标志；校验签名时传入当前系统支持的签名标志。
+     * @return 当前已安装宿主的包信息；无法读取时终止更新而不猜测版本。
+     */
+    @Suppress("DEPRECATION")
+    private fun readInstalledPackageInfo(flags: Int = 0): PackageInfo = try {
+        appContext.packageManager.getPackageInfo(BuildConfig.APPLICATION_ID, flags)
+    } catch (error: PackageManager.NameNotFoundException) {
+        throw IOException("无法读取系统已安装的汉化器版本，请稍后重试", error)
+    }
+
+    /**
+     * 取得系统包信息中的有效显示版本，缺失时保持失败关闭，禁止改用编译期常量猜测。
+     *
+     * @param info PackageManager 当前返回的包信息。
+     * @return 不为空白的实际版本名称。
+     */
+    private fun packageVersionName(info: PackageInfo): String = info.versionName?.takeIf { it.isNotBlank() }
+        ?: throw IOException("系统已安装的汉化器缺少版本名称，已停止更新")
+
+    /**
+     * 按当前系统能力读取完整安装版本号，保持 Android 8/8.1 兼容。
+     *
+     * @param info 已安装包或候选 APK 的系统解析结果。
+     * @return Android 9 起包含 major 分量的长版本号，旧系统返回原整数版本号。
+     */
+    @Suppress("DEPRECATION")
+    private fun packageVersionCode(info: PackageInfo): Long = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        info.longVersionCode
+    } else {
+        info.versionCode.toLong()
     }
 
     /**
@@ -265,7 +344,7 @@ internal class AppUpdateManager(
         } else {
             info.signatures
         }
-        if (signatures.isNullOrEmpty()) throw IOException("无法验证汉化器 APK 签名，已停止自动更新")
+        if (signatures.isNullOrEmpty()) throw IOException("无法验证汉化器 APK 签名，已停止安装")
         return signatures.map { signature ->
             MessageDigest.getInstance("SHA-256").digest(signature.toByteArray()).toHex()
         }.sorted()

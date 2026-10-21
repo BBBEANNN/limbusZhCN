@@ -11,7 +11,7 @@ import com.example.limbuszhcn.PersistentDiagnosticLog
 import java.util.concurrent.Executors
 
 /**
- * 保存汉化器自更新状态，使下载跨越屏幕旋转且只由宿主前台触发安装。
+ * 保存玩家手动检查的更新状态，使下载跨越屏幕旋转，且安装只能来自玩家的明确请求。
  *
  * @param application 用于访问宿主私有缓存与系统包管理器的应用上下文。
  */
@@ -19,8 +19,9 @@ internal class AppUpdateViewModel(application: Application) : AndroidViewModel(a
     private val manager = AppUpdateManager(application)
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var checkOnNextStart = true
     private var externalFlow = false
+    // 离开前台使尚未完成的安装请求失效，避免后台校验结束后在下次打开时突弹安装器。
+    private var installationAttempt = 0L
     @Volatile private var cleared = false
 
     /** 当前界面可观察的检查、下载和待安装状态。 */
@@ -31,22 +32,9 @@ internal class AppUpdateViewModel(application: Application) : AndroidViewModel(a
     var hostResumed by mutableStateOf(false)
         private set
 
-    /** 每轮真正返回前台时检查一次，旋转重建和系统安装流程不重复检查。 */
-    fun onHostStarted() {
-        if (checkOnNextStart && !externalFlow) {
-            checkOnNextStart = false
-            checkForUpdates()
-        }
-    }
-
-    /**
-     * 标记下一次需要自检的前台入口。
-     *
-     * @param changingConfigurations 是否仅为屏幕旋转等配置变更而重建界面。
-     */
-    fun onHostStopped(changingConfigurations: Boolean) {
-        if (!changingConfigurations && !externalFlow) checkOnNextStart = true
-    }
+    /** 系统实际安装的显示版本，不使用可能被旧构建内联的版本常量。 */
+    var installedVersionName by mutableStateOf("读取中")
+        private set
 
     /**
      * 更新可安全打开系统安装界面的生命周期状态。
@@ -55,9 +43,15 @@ internal class AppUpdateViewModel(application: Application) : AndroidViewModel(a
      */
     fun updateHostResumed(resumed: Boolean) {
         hostResumed = resumed
+        if (resumed) {
+            refreshInstalledState()
+        } else {
+            installationAttempt++
+            state = state.copy(installationRequested = false)
+        }
     }
 
-    /** 后台检查并自动准备新版，网络错误只更新本卡片，不阻断游戏入口。 */
+    /** 玩家点击检查后才联网并准备新版，准备完成只显示按钮，不打开系统安装器。 */
     fun checkForUpdates() {
         if (state.working || externalFlow) return
         state = AppUpdateUiState(message = "正在检查汉化器新版本…", working = true)
@@ -72,13 +66,12 @@ internal class AppUpdateViewModel(application: Application) : AndroidViewModel(a
                             AppUpdateUiState(message = "当前已是最新版本")
                         } else {
                             AppUpdateUiState(
-                                message = "新版 ${update.versionName} 已下载，准备打开系统安装界面",
-                                update = update,
-                                automaticInstallPending = true
+                                message = "新版 ${update.versionName} 已准备好，点击安装新版继续",
+                                update = update
                             )
                         }
                     },
-                    onFailure = { error -> reportFailure("自动更新未完成", error) }
+                    onFailure = { error -> reportFailure("检查更新未完成", error) }
                 )
             }
         }
@@ -88,13 +81,23 @@ internal class AppUpdateViewModel(application: Application) : AndroidViewModel(a
     fun requestInstallation() {
         val update = state.update ?: return
         if (state.working || externalFlow) return
+        val attempt = ++installationAttempt
         state = state.copy(working = true, message = "正在校验已下载的新版…")
         executor.execute {
             val result = runCatching { manager.validatePreparedUpdate(update) }
             post {
+                if (attempt != installationAttempt) {
+                    // 玩家在校验期间离开页面，本次安装请求不在返回前台后自动重放。
+                    state = state.copy(working = false, installationRequested = false)
+                    return@post
+                }
                 result.fold(
-                    onSuccess = {
-                        state = state.copy(working = false, automaticInstallPending = true)
+                    onSuccess = { needed ->
+                        if (needed) {
+                            state = state.copy(working = false, installationRequested = true)
+                        } else {
+                            clearObsoleteUpdate()
+                        }
                     },
                     onFailure = { error -> reportFailure("安装包校验失败，请重新检查更新", error) }
                 )
@@ -108,9 +111,19 @@ internal class AppUpdateViewModel(application: Application) : AndroidViewModel(a
      * @return 本轮已验证的 APK；没有请求时返回 null。
      */
     fun consumeInstallationRequest(): PreparedAppUpdate? {
-        if (!state.automaticInstallPending || !hostResumed || state.working) return null
-        state = state.copy(automaticInstallPending = false)
-        return state.update
+        if (!state.installationRequested || !hostResumed || state.working || externalFlow) return null
+        state = state.copy(installationRequested = false)
+        val update = state.update ?: return null
+        return runCatching {
+            // 校验任务结束到打开安装器之间，系统可能已通过其它入口完成升级；再次只读核对。
+            if (manager.isUpdateNewerThanInstalled(update)) update else {
+                clearObsoleteUpdate()
+                null
+            }
+        }.getOrElse { error ->
+            reportFailure("无法确认当前安装版本", error)
+            null
+        }
     }
 
     /**
@@ -130,8 +143,8 @@ internal class AppUpdateViewModel(application: Application) : AndroidViewModel(a
      */
     fun finishExternalFlow(message: String) {
         externalFlow = false
-        checkOnNextStart = false
         state = state.copy(message = message)
+        refreshInstalledState()
     }
 
     /**
@@ -145,8 +158,26 @@ internal class AppUpdateViewModel(application: Application) : AndroidViewModel(a
         state = state.copy(
             message = "$stage：${error.message ?: "请检查网络后重试"}",
             working = false,
-            automaticInstallPending = false
+            update = null,
+            installationRequested = false
         )
+    }
+
+    /** 仅查询本地 PackageManager，清除系统已安装的待更新项，不发起任何联网或安装。 */
+    private fun refreshInstalledState() {
+        runCatching {
+            installedVersionName = manager.installedVersionName()
+            state.update?.let { update ->
+                if (!manager.isUpdateNewerThanInstalled(update)) clearObsoleteUpdate()
+            }
+        }.onFailure { error -> reportFailure("无法读取当前安装版本", error) }
+    }
+
+    /** 同版或更高版本已安装时移除旧按钮与请求，避免继续重试同一个 APK。 */
+    private fun clearObsoleteUpdate() {
+        installationAttempt++
+        installedVersionName = manager.installedVersionName()
+        state = AppUpdateUiState(message = "当前已是最新版本")
     }
 
     /** 界面永久销毁时取消后台任务，避免下载线程持有已失效的状态。 */
@@ -173,11 +204,11 @@ internal class AppUpdateViewModel(application: Application) : AndroidViewModel(a
  * @property message 当前更新步骤或结果。
  * @property working 是否正在检查、下载或重新校验。
  * @property update 已验证并可交给系统安装器的新版 APK。
- * @property automaticInstallPending 是否有尚未消费的一次性自动安装请求。
+ * @property installationRequested 玩家是否请求了尚未消费的一次性安装操作。
  */
 internal data class AppUpdateUiState(
-    val message: String = "每次打开时自动检查汉化器版本",
+    val message: String = "点击检查更新，不会自动检查或弹出安装界面",
     val working: Boolean = false,
     val update: PreparedAppUpdate? = null,
-    val automaticInstallPending: Boolean = false
+    val installationRequested: Boolean = false
 )

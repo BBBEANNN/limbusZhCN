@@ -51,6 +51,43 @@ class AppUpdatePolicyTest {
         assertFalse(AppUpdatePolicy.isNewerVersion("1.5", "1.5.1"))
     }
 
+    /** 验证旧代码仍处于 1.5 时，系统已安装的 1.5.1 不能再次被当成待安装新版。 */
+    @Test
+    fun actualInstalledVersionRejectsRepeatedSameVersionInstallation() {
+        assertFalse(AppUpdatePolicy.isInstallableUpgrade("1.5.1", 7L, "1.5.1", 7L))
+        assertFalse(AppUpdatePolicy.isInstallableUpgrade("v1.5.1", 7L, "1.5.1.0", 7L))
+        assertFalse(AppUpdatePolicy.isInstallableUpgrade("1.5.1", 7L, "1.5.2", 8L))
+        assertTrue(AppUpdatePolicy.isInstallableUpgrade("1.5.2", 8L, "1.5.1", 7L))
+    }
+
+    /** 验证名称更新但安装号相同或较旧的错误发布不能进入系统安装器。 */
+    @Test
+    fun requiresBothDisplayAndInstallationVersionsToIncrease() {
+        assertFalse(AppUpdatePolicy.isInstallableUpgrade("1.6", 7L, "1.5.1", 7L))
+        assertFalse(AppUpdatePolicy.isInstallableUpgrade("1.6", 6L, "1.5.1", 7L))
+        assertFalse(AppUpdatePolicy.isInstallableUpgrade("1.5.1", 8L, "1.5.1", 7L))
+        assertFalse(AppUpdatePolicy.isInstallableUpgrade("1.5", 8L, "1.5.1", 7L))
+    }
+
+    /** 验证下载或授权期间外部完成升级后，复查必须使用新的系统快照取消旧待安装项。 */
+    @Test
+    fun installingWhileWaitingInvalidatesPreparedUpgrade() {
+        val candidateName = "1.5.2"
+        val candidateCode = 8L
+        assertTrue(AppUpdatePolicy.isInstallableUpgrade(candidateName, candidateCode, "1.5.1", 7L))
+        assertFalse(AppUpdatePolicy.isInstallableUpgrade(candidateName, candidateCode, "1.5.2", 8L))
+        assertFalse(AppUpdatePolicy.isInstallableUpgrade(candidateName, candidateCode, "1.6", 9L))
+    }
+
+    /** 验证 Android 9 起的长版本号不会被截断为 Int，导致错误允许覆盖同版或更高版本。 */
+    @Test
+    fun comparesFullLongInstallationVersionCodes() {
+        val installedCode = Int.MAX_VALUE.toLong() + 1L
+        assertFalse(AppUpdatePolicy.isInstallableUpgrade("1.6", 9L, "1.5.1", installedCode))
+        assertFalse(AppUpdatePolicy.isInstallableUpgrade("1.6", installedCode, "1.5.1", installedCode))
+        assertTrue(AppUpdatePolicy.isInstallableUpgrade("1.6", installedCode + 1L, "1.5.1", installedCode))
+    }
+
     /** 验证较长的合法数字分量不会溢出，从而把更新方向颠倒。 */
     @Test
     fun comparesVersionsWithoutLongOverflow() {
@@ -77,7 +114,7 @@ class AppUpdatePolicyTest {
         }
     }
 
-    /** 验证草稿和预发布即使有完整 APK，也不能进入普通用户的自动更新流程。 */
+    /** 验证草稿和预发布即使有完整 APK，也不能进入普通用户的稳定版更新流程。 */
     @Test
     fun rejectsDraftsAndPrereleases() {
         for (flag in listOf("draft", "prerelease")) {

@@ -41,15 +41,20 @@ flowchart LR
 
 ## 汉化器自身更新
 
-汉化器 APK 更新与汉化包更新是两个独立流程。主界面每次进入前台时，后台查询固定官方仓库
-`BBBEANNN/limbusZhCN` 的最新稳定 GitHub Release；检查或下载失败只显示状态，不阻塞游戏启动。
+汉化器 APK 更新与汉化包更新是两个独立流程。玩家点击“检查更新”后才在后台查询固定官方仓库
+`BBBEANNN/limbusZhCN` 的最新稳定 GitHub Release；启动、返回前台及旋转不触发联网自检。
+检查或下载失败只显示状态，不阻塞游戏启动。
 仅接受该仓库的单一 APK 资产，跳过草稿与预发布，不跟随用户可编辑的汉化包 Releases 地址。
 发现新版本后自动下载到宿主私有缓存，先核对 GitHub SHA-256（提供时）、包名、递增的
-`versionCode`、最低 Android 版本以及当前安装的签名，再交给 Android 系统安装器。
-安装权限未开启时引导用户授权，返回后继续安装；系统安装确认仍须由用户完成。
+`versionCode`、最低 Android 版本以及当前安装的签名，准备完成后只显示“安装新版”按钮。
+玩家点击安装后才打开 Android 安装器；安装权限未开启时引导授权并核对本次玩家请求后续接。
+系统安装确认仍须由用户完成。
 
 检查与下载由 Activity 的 ViewModel 持有，避免旋转屏幕重复请求；设置页和安装页返回时
-不重新触发同一轮检查。安装器只通过专用 FileProvider 获得更新 APK 的临时只读 URI。
+只读取本地实际安装状态，已是同版/更高时清除待安装项，不联网检查、重新下载或重开安装器。
+版本读取使用 PackageManager 的当前包信息；不得依赖可能在 Kotlin 增量编译时沿用旧内联值的
+BuildConfig.VERSION_NAME / VERSION_CODE。安装前再次读取实际安装版本并核对文件完整性。
+安装器只通过专用 FileProvider 获得更新 APK 的临时只读 URI。
 不得卸载旧版、清除宿主或容器数据，不修改游戏 APK。正式发布必须沿用同一签名，同时提高
 数字 `versionName`、对应的 Release 标签（例如 `v1.6`）与 `versionCode`，APK 命名为
 `LimbusZhCN-<tag>.apk`。下载前按数字版本名筛选，下载后以 APK 实际版本号最终拒绝降级；

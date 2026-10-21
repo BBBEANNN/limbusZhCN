@@ -36,11 +36,11 @@ internal data class TranslationIndexRecord(
  * @property version 汉化包版本。
  * @property archiveSha256 汉化归档的 SHA-256。
  * @property inputSha256 所有有效配对记录的确定性摘要。
- * @property uniqueEntries 无歧义或已满足优势阈值的完整文本映射。
+ * @property uniqueEntries 无歧义、符合来源优先级或已满足优势阈值的完整文本映射。
  * @property termEntries 可幂等地嵌入格式化文本的短术语映射。
  * @property sourceRecordCount 参与本次编译的去重源记录数量。
  * @property conflictCount 因译文冲突而未进入完整索引的原文数量。
- * @property dominantEntryCount 通过优势阈值解决冲突的原文数量。
+ * @property dominantEntryCount 通过来源优先级或优势阈值解决冲突的原文数量。
  * @property candidateSourceFileCount 汉化包中候选 JSON 文件数量。
  * @property availableSourceFileCount 容器中可读取日文对应文件的数量。
  */
@@ -123,7 +123,10 @@ internal class TranslationIndexCompiler {
             val authoritative = occurrences.filter(::isCanonicalTerm)
             val candidates = authoritative.ifEmpty { occurrences }
             val translations = candidates.groupingBy(TranslationIndexRecord::translation).eachCount()
-            val resolved = resolveTranslation(translations)
+            val preferredDialogue = if (translations.size > 1) {
+                resolveBattleSpeechBubbleTranslation(candidates)
+            } else null
+            val resolved = preferredDialogue ?: resolveTranslation(translations)
             if (resolved != null) {
                 unique[source] = resolved
                 if (translations.size > 1) dominantEntries += 1
@@ -205,11 +208,25 @@ internal class TranslationIndexCompiler {
         }
     }
 
+    /** 同族战斗气泡的重复原句优先采用主表，其他资源和字段仍走原有歧义规则。 */
+    private fun resolveBattleSpeechBubbleTranslation(occurrences: List<TranslationIndexRecord>): String? {
+        if (occurrences.any { it.field != "dlg" }) return null
+        val resources = occurrences.map { normalizedResourceFileName(it.path) to it.translation }
+        if (resources.any { (fileName, _) -> !BATTLE_SPEECH_BUBBLE_RESOURCE.matches(fileName) }) return null
+        // 主表自身有多个译文或只有章节表时，不能根据资源名替调用方猜测上下文。
+        return resources.filter { (fileName, _) -> fileName == BATTLE_SPEECH_BUBBLE_MAIN }
+            .map { (_, translation) -> translation }
+            .distinct()
+            .singleOrNull()
+    }
+
+    private fun normalizedResourceFileName(path: String): String =
+        path.substringAfterLast('/').substringAfterLast('\\').lowercase().removePrefix("jp_")
+
     private fun termSourcePriority(path: String): Int {
-        val rawFileName = path.substringAfterLast('/').substringAfterLast('\\').lowercase()
         // activateRedirect 传入的是 japaneseSourceFor 生成的 jp/<目录>/JP_<文件>.json，
         // 直接匹配 bufs/battlekeywords 前缀永远落空，词典权威优先级在真机上从未生效。
-        val fileName = rawFileName.removePrefix("jp_")
+        val fileName = normalizedResourceFileName(path)
         return when {
             fileName.startsWith("bufs") || fileName.startsWith("battlekeywords") ->
                 CANONICAL_GLOSSARY_PRIORITY
@@ -331,6 +348,8 @@ internal class TranslationIndexCompiler {
         private val CLAUSE_DELIMITERS = setOf('、', '，', ',', '：', ':')
         private val CONDITION_SUFFIXES = setOf("時", "前", "後", "場合", "際")
         private const val CANONICAL_GLOSSARY_PRIORITY = 3
+        private const val BATTLE_SPEECH_BUBBLE_MAIN = "battlespeechbubbledlg.json"
+        private val BATTLE_SPEECH_BUBBLE_RESOURCE = Regex("battlespeechbubbledlg(?:-[^.]+)?\\.json")
     }
 }
 
@@ -452,9 +471,9 @@ internal class TranslationIndexStore(private val root: Path) {
         /** 每个不可变索引版本目录内的二进制正文文件名。 */
         const val INDEX_FILE = "index.bin"
         private const val MANIFEST_FILE = "manifest.properties"
-        // schema 10 保留词典同文保护；schema 11 重建术语来源、条件与幂等筛选规则。
+        // schema 11 重建术语安全规则；schema 12 重建战斗气泡主表优先级，避免复用旧索引。
         // 与 native 端 kIndexSchema 保持同步。
-        private const val INDEX_SCHEMA = 11
+        private const val INDEX_SCHEMA = 12
         private val INDEX_MAGIC = byteArrayOf('L'.code.toByte(), 'Z'.code.toByte(), 'T'.code.toByte(), 'I'.code.toByte(), '1'.code.toByte(), 0)
     }
 }

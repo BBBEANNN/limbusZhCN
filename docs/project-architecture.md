@@ -298,6 +298,12 @@ strings are counted and excluded from the context-free fallback. Schema 10 also
 stores a curated short-term table for longest-match replacement inside formatted
 or rich text. Dominant conflicts require at least two samples, two-thirds support
 and a 2x lead over the runner-up; canonical Buff/battle-keyword names take priority.
+Schema 12 additionally prefers the unsuffixed `BattleSpeechBubbleDlg.json` main
+table when every candidate for a source belongs to that resource family and the
+`dlg` field, and the main table has exactly one distinct translation. Other
+sources, fields, missing main tables and conflicting main-table translations
+retain the existing resolution rules. Kotlin/native schema changes invalidate
+old index caches even when the paired input records are unchanged.
 Paired square brackets and TMP rich
 text tags are removed when deriving terms, so sources such as `[攻撃前]` and
 `<color><s>長姉</s></color>` also cover their embedded runtime forms.
@@ -307,7 +313,7 @@ whose translations still contain the source, such as `以上 -> 或以上`, are 
 from embedded matching so repeated `SkillPerLevel -> Skill -> TMP` passes remain
 idempotent. Canonical identity terms remain eligible and protect entire spans.
 The compiler and native object-graph traversal use the same explicit display-field
-policy. In addition to the original skill/UI fields, schema 11 includes verified
+policy. In addition to the original skill/UI fields, the current index includes verified
 display values such as `story`, `relatedChapterText`, and `openConditionNumber`.
 Translations containing Unicode replacement characters or illegal control bytes
 are omitted so a damaged package entry leaves the official Japanese text intact.
@@ -436,9 +442,10 @@ creates as translation results. While one of those tagged strings is assigned,
 the receiving TMP component temporarily uses the Chinese asset as its primary
 font so common Han glyphs and Simplified-Chinese-only glyphs do not alternate
 between the Japanese primary face and the fallback. The original font material is
-remembered as well: outline width/color are copied onto the per-component Chinese
-material so coin-skill text retains the game's black edge, and the exact material
-is restored with the original font. Translated text without an explicit
+remembered as well. Translated controls share the Chinese font asset's own SDF
+material with the outline/face compensation described above; Japanese atlas or
+weight parameters are not copied. The exact original material is restored with
+the original font. Translated text without an explicit
 `line-height` tag receives a small line-spacing floor before layout. This also
 covers rows created by TMP automatic wrapping; checking only for literal newlines
 left long skill descriptions overlapping. Single-line labels are unaffected

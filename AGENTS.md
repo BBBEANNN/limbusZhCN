@@ -29,7 +29,7 @@ flowchart LR
     Storage --> Collector[TranslationRecordCollector]
     Installer --> Collector
     Collector --> Compiler[TranslationIndexCompiler]
-    Compiler --> Index[宿主私有 schema 11 索引]
+    Compiler --> Index[宿主私有 schema 12 索引]
     Index --> Native[IL2CPP 文本与 TMP 接管]
     Native --> VA
     UI --> Transfer[GameResourceTransfer]
@@ -94,7 +94,7 @@ flowchart LR
   `Rewrite Limbus GMS GetServiceRequest`,随后仍可进入 `PlayDone`。其中
   `libcovault-appsec.so +0x4e564` 的 `SIGILL` 被放行后游戏继续运行,不得把它单独作为
   GMS broker 修复失败的判据。Android 13/MIUI 设备仍需用相同四条日志复测。
-- 运行时文本索引为日语单源 schema 11，编译端/native 必须版本一致并同步显示字段。
+- 运行时文本索引为日语单源 schema 12，编译端/native 必须版本一致并同步显示字段。
   除 `story/relatedChapterText/openConditionNumber` 外，还覆盖经审查的 `speaker`、
   `displayName`、`statText`、`goalDescription1..8`；拒绝 Unicode 替换字符和非法控制字符。
   接管必须在访客配置阶段挂接 `dlsym`,只把 Unity 请求的 `il2cpp_init`
@@ -132,6 +132,9 @@ flowchart LR
   同一文本经过 `SkillPerLevel -> Skill -> TMP` 多层接管时会不断前插“或”。
 - Buff/战斗关键词词典中原译文相同的条目也须保留，防止 `保存` 被其它页面的同文译名
   `检查点` 覆盖；最长术语匹配必须保护完整的同文跨度。纯标点只能参与整句匹配。
+- 战斗气泡同句异译仅在全部候选均为 `BattleSpeechBubbleDlg` 资源族的 `dlg`，且无章节
+  后缀主表译文唯一时优先主表。词典权威优先级不变；其他资源、字段、无主表或主表内部
+  冲突继续使用原有歧义规则。索引语义改变时须同步提高 Kotlin/native schema 以重建缓存。
 - 数组只在同一资源、同一父数组内按 `id/level/index/idx/originalId/key` 对应，不得因 ID
   缺失而借用另一条记录的位置。重复 ID 仅在两侧数量相等时按本组出现次序对应。
 - debug 的 `audit_translation_index` 只输出路径、上下文、字段、哈希与覆盖状态，报告

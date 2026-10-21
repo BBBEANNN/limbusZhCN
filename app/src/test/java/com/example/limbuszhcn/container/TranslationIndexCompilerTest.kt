@@ -46,6 +46,118 @@ class TranslationIndexCompilerTest {
         assertEquals(64, compiled.inputSha256.length)
     }
 
+    /** 战斗气泡主表与章节表的同句异译可由主表解决，不再把已有译文整体丢弃。 */
+    @Test
+    fun prefersMainBattleSpeechBubbleTranslationForScreenshotDialogue() {
+        val source = "聞こえますか？一対の上腕骨と二十四本の肋骨が奏でるティビアのメロディーが！"
+        val translation = "听见了吗？那由提比娅的一对肱骨与二十四根肋骨奏响的旋律！"
+        val records = listOf(
+            record("jp/JP_BattleSpeechBubbleDlg.json", "battle_s3_10614_1_2", "dlg", source, translation),
+            record("jp/JP_BattleSpeechBubbleDlg-a1c9p3.json", "9SV-BAT15-04", "dlg", source, "你$translation")
+        )
+        val compiled = TranslationIndexCompiler().apply { records.forEach(::add) }.compile("test", "archive")
+        val reversed = TranslationIndexCompiler().apply { records.reversed().forEach(::add) }.compile("test", "archive")
+
+        assertEquals(translation, compiled.uniqueEntries[source])
+        assertEquals(0, compiled.conflictCount)
+        assertEquals(1, compiled.dominantEntryCount)
+        assertFalse(compiled.termEntries.containsKey(source))
+        assertEquals(compiled.uniqueEntries, reversed.uniqueEntries)
+        assertEquals(compiled.inputSha256, reversed.inputSha256)
+    }
+
+    /** 主表的同一译文可以重复出现；章节表的记录数量不能覆盖主表的来源优先级。 */
+    @Test
+    fun prefersUniqueMainDialogueOverRepeatedChapterTranslations() {
+        val compiler = TranslationIndexCompiler().apply {
+            repeat(2) { index ->
+                add(record("Localize\\JP\\JP_BattleSpeechBubbleDlg.json", "main-$index", "dlg", "始めよう。", "开始吧。"))
+            }
+            repeat(4) { index ->
+                add(record("BattleSpeechBubbleDlg-a1c9p3.json", "chapter-$index", "dlg", "始めよう。", "开始行动。"))
+            }
+        }
+
+        val compiled = compiler.compile("test", "archive")
+
+        assertEquals("开始吧。", compiled.uniqueEntries["始めよう。"])
+        assertEquals(0, compiled.conflictCount)
+        assertEquals(1, compiled.dominantEntryCount)
+    }
+
+    /** 任何跨资源族候选都会阻止气泡主表优先级，近似文件名前缀也不能冒充该资源族。 */
+    @Test
+    fun keepsCrossResourceDialogueConflictsAmbiguous() {
+        for (otherPath in listOf("jp/StoryData/JP_S919B.json", "jp/JP_BattleSpeechBubbleDlgExtra.json")) {
+            val compiler = TranslationIndexCompiler().apply {
+                add(record("jp/JP_BattleSpeechBubbleDlg.json", "main", "dlg", "始めよう。", "开始吧。"))
+                add(record("jp/JP_BattleSpeechBubbleDlg-a1c9p3.json", "chapter", "dlg", "始めよう。", "开始行动。"))
+                add(record(otherPath, "other", "dlg", "始めよう。", "出发吧。"))
+            }
+
+            val compiled = compiler.compile("test", "archive")
+
+            assertFalse(otherPath, compiled.uniqueEntries.containsKey("始めよう。"))
+            assertEquals(otherPath, 1, compiled.conflictCount)
+            assertEquals(otherPath, 0, compiled.dominantEntryCount)
+        }
+    }
+
+    /** 主表内部存在异译，或只有不同章节表时，不能擅自挑选一个气泡译文。 */
+    @Test
+    fun keepsDialogueAmbiguousWithoutOneMainTranslation() {
+        val cases = listOf(
+            listOf(
+                record("jp/JP_BattleSpeechBubbleDlg.json", "main-a", "dlg", "始めよう。", "开始吧。"),
+                record("jp/JP_BattleSpeechBubbleDlg.json", "main-b", "dlg", "始めよう。", "开始行动。"),
+                record("jp/JP_BattleSpeechBubbleDlg-a1c9p3.json", "chapter", "dlg", "始めよう。", "出发吧。")
+            ),
+            listOf(
+                record("jp/JP_BattleSpeechBubbleDlg-a1c9p2.json", "chapter-a", "dlg", "始めよう。", "开始吧。"),
+                record("jp/JP_BattleSpeechBubbleDlg-a1c9p3.json", "chapter-b", "dlg", "始めよう。", "开始行动。")
+            )
+        )
+        cases.forEach { records ->
+            val compiled = TranslationIndexCompiler().apply { records.forEach(::add) }.compile("test", "archive")
+
+            assertFalse(compiled.uniqueEntries.containsKey("始めよう。"))
+            assertEquals(1, compiled.conflictCount)
+            assertEquals(0, compiled.dominantEntryCount)
+        }
+    }
+
+    /** 只允许 dlg 应用主表优先级，不能因此裁决说明、名称或其他对白字段。 */
+    @Test
+    fun keepsNonDialogueFieldConflictsAmbiguousWithinBubbleResources() {
+        for (otherField in listOf("desc", "name", "dialog", "content")) {
+            val compiler = TranslationIndexCompiler().apply {
+                add(record("jp/JP_BattleSpeechBubbleDlg.json", "main", "dlg", "戦闘開始の合図を待ってください。", "等待开战信号。"))
+                add(record("jp/JP_BattleSpeechBubbleDlg-a1c9p3.json", "chapter", otherField, "戦闘開始の合図を待ってください。", "请等待开战信号。"))
+            }
+
+            val compiled = compiler.compile("test", "archive")
+
+            assertFalse(otherField, compiled.uniqueEntries.containsKey("戦闘開始の合図を待ってください。"))
+            assertEquals(otherField, 1, compiled.conflictCount)
+        }
+    }
+
+    /** 原有词典权威优先级仍高于战斗气泡主表，不能让页面对白覆盖正式术语。 */
+    @Test
+    fun keepsGlossaryAuthorityAboveBattleSpeechBubbleMainTable() {
+        val compiler = TranslationIndexCompiler().apply {
+            add(record("jp/JP_BattleSpeechBubbleDlg.json", "main", "dlg", "リトライ", "再次挑战"))
+            add(record("jp/JP_BattleSpeechBubbleDlg-a1c9p3.json", "chapter", "dlg", "リトライ", "重新来过"))
+            add(record("jp/JP_BattleKeywords.json", "retry", "name", "リトライ", "重试"))
+        }
+
+        val compiled = compiler.compile("test", "archive")
+
+        assertEquals("重试", compiled.uniqueEntries["リトライ"])
+        assertEquals("重试", compiled.termEntries["リトライ"])
+        assertEquals(0, compiled.conflictCount)
+    }
+
     /** 从明确术语派生括号或富文本内部名称，同时把扩展词限制为全文匹配。 */
     @Test
     fun resolvesDominantTerminologyAndExtractsBracketedTerms() {
@@ -317,7 +429,7 @@ class TranslationIndexCompilerTest {
         assertEquals(2, compiled.conflictCount)
     }
 
-    /** 发布二进制索引和原子指针时，必须使用与 native 一致的 schema 11。 */
+    /** 发布二进制索引和原子指针时，必须使用与 native 一致的 schema 12。 */
     @Test
     fun activatesImmutableBinaryIndexAndPointer() {
         val root = Files.createTempDirectory("limbus-index-test")
@@ -329,11 +441,11 @@ class TranslationIndexCompilerTest {
         val indexFile = TranslationIndexStore(root).activate(compiled)
 
         assertTrue(indexFile.exists())
-        assertTrue(indexFile.parent.fileName.toString().contains("-s11-"))
+        assertTrue(indexFile.parent.fileName.toString().contains("-s12-"))
         assertEquals(indexFile.toString().replace('\\', '/'), root.resolve("active-index.path").readText().trim())
         DataInputStream(indexFile.inputStream()).use { input ->
             assertEquals("LZTI1\u0000", String(input.readNBytes(6), Charsets.US_ASCII))
-            assertEquals(11, input.readInt())
+            assertEquals(12, input.readInt())
             assertEquals(1, input.readInt())
             assertEquals(1, input.readInt())
             assertEquals("Sinner", input.readSizedUtf8())
@@ -344,7 +456,7 @@ class TranslationIndexCompilerTest {
         val properties = Properties().apply {
             indexFile.parent.resolve("manifest.properties").inputStream().use(::load)
         }
-        assertEquals("11", properties.getProperty("schema"))
+        assertEquals("12", properties.getProperty("schema"))
         assertEquals("1", properties.getProperty("uniqueEntryCount"))
         assertEquals("1", properties.getProperty("termEntryCount"))
         assertEquals("1", properties.getProperty("sourceRecordCount"))

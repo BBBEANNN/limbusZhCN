@@ -4,6 +4,7 @@ import android.app.IServiceConnection;
 import android.content.ComponentName;
 import android.os.IBinder;
 import android.os.IInterface;
+import android.os.Parcel;
 import android.os.RemoteException;
 import android.util.Log;
 
@@ -11,6 +12,7 @@ import com.lody.virtual.client.VClient;
 import com.lody.virtual.client.core.VirtualCore;
 import com.lody.virtual.helper.collection.ArrayMap;
 import com.lody.virtual.helper.compat.BuildCompat;
+import com.lody.virtual.helper.compat.ServiceConnectionCompat;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
@@ -85,10 +87,41 @@ public class ServiceConnectionDelegate extends IServiceConnection.Stub {
     }
 
     public void connected(ComponentName name, IBinder service, boolean dead) throws RemoteException {
+        deliverConnected(name, service, null, dead);
+    }
+
+    @Override
+    public IInterface queryLocalInterface(String descriptor) {
+        // A framework Proxy must serialize the four-argument callback instead of invoking
+        // a missing hidden-interface method directly on this legacy-compiled delegate.
+        if (ServiceConnectionCompat.isSessionAware()
+                && ServiceConnectionCompat.DESCRIPTOR.equals(descriptor)) {
+            return null;
+        }
+        return super.queryLocalInterface(descriptor);
+    }
+
+    @Override
+    public boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
+        if (ServiceConnectionCompat.isSessionAware()
+                && code == ServiceConnectionCompat.TRANSACTION_CONNECTED) {
+            ServiceConnectionCompat.SessionConnection connection =
+                    ServiceConnectionCompat.readSessionConnected(data);
+            deliverConnected(connection.name, connection.service, connection.session, connection.dead);
+            return true;
+        }
+        return super.onTransact(code, data, reply, flags);
+    }
+
+    private void deliverConnected(ComponentName name, IBinder service, IBinder session, boolean dead)
+            throws RemoteException {
         service = wrapLimbusPlayBillingService(name, service);
         service = wrapLimbusGmsServiceBroker(name, service);
         ComponentName deliveryComponent = targetComponent != null ? targetComponent : name;
-        if (BuildCompat.isOreo()) {
+        if (ServiceConnectionCompat.isSessionAware()) {
+            ServiceConnectionCompat.sendSessionConnected(
+                    mConn.asBinder(), deliveryComponent, service, session, dead);
+        } else if (BuildCompat.isOreo()) {
             IServiceConnectionO.connected.call(mConn, deliveryComponent, service, dead);
         } else {
             mConn.connected(name, service);

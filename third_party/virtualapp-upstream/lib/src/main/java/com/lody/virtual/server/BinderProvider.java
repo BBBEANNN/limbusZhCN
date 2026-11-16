@@ -222,7 +222,8 @@ public final class BinderProvider extends ContentProvider {
     }
 
     private boolean shouldPreserveRunningVirtualClients(Context context) {
-        return "com.example.limbuszhcn".equals(context.getPackageName());
+        return "com.example.limbuszhcn".equals(context.getPackageName())
+                || "com.example.limbuszhcn.android17".equals(context.getPackageName());
     }
 
     private void addService(String name, IBinder service) {

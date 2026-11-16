@@ -1,5 +1,13 @@
 # Limbus Company 汉化器
 
+> **Android 17 修复分支**：针对 Samsung / API 37 的
+> `IServiceConnection.connected(..., IBinderSession, ...)` 启动闪退增加 Binder 兼容。
+> 本分支基于 [BBBEANNN/limbusZhCN](https://github.com/BBBEANNN/limbusZhCN)
+> 的 `7c3cdb14fe439a706122eb657645b47499265ef1`，属于独立社区构建。
+> 公开 APK 使用独立包名 `com.example.limbuszhcn.android17`，可与原版并存，
+> 不会覆盖或清空原版容器；首次使用需在新容器准备游戏资源，也可通过原版高级设置迁出资源后迁入。
+> 修复设计与验证边界见 [Android 17 兼容记录](docs/android17-service-connection-fix.md)。
+
 这是一个面向 `com.ProjectMoon.LimbusCompany` 的 Android 汉化辅助项目。当前主线方案是把 Google Play 已安装的 Limbus Company 同步进 VirtualApp 容器，在容器内启动游戏，并把汉化资源写入容器可见的游戏数据目录。
 
 项目目标不是修改游戏 APK，也不是注入游戏进程做热补丁；核心是维护一个尽量接近真实 Google Play 安装环境、同时对游戏隐藏宿主机工具和汉化器自身的容器运行时。

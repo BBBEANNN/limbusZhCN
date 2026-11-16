@@ -18,14 +18,17 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.example.limbuszhcn"
+        applicationId = rootProject.extra["PACKAGE_NAME_32BIT"] as String
         // 与当前 Limbus Company 本体保持一致，覆盖 Android 8.0 及以上仍在使用的常见机型。
         // VirtualApp 库自身最低支持 API 23，但应用使用了 java.time，因此安全下限设为 API 26。
         minSdk = 26
         targetSdk = 35
         // 手动更新补丁提高安装版本，确保修复包可覆盖已发布版本并保留容器数据。
-        versionCode = 8
-        versionName = "1.5.2"
+        versionCode = 9
+        versionName = "1.5.3"
+
+        manifestPlaceholders["LIMBUS_APP_LABEL"] = providers.gradleProperty("limbusAppLabel")
+            .orElse("@string/app_name").get()
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -86,6 +89,7 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation("org.json:json:20240303")
     testImplementation("com.google.android.gms:play-services-tasks:18.2.0")
+    testImplementation("org.robolectric:robolectric:4.14.1")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

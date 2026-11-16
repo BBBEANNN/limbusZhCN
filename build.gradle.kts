@@ -7,4 +7,5 @@ plugins {
 
 extra["VERSION"] = "2.3.2-limbus"
 extra["VERSION_CODE"] = 23202
-extra["PACKAGE_NAME_32BIT"] = "com.example.limbuszhcn"
+extra["PACKAGE_NAME_32BIT"] = providers.gradleProperty("limbusApplicationId")
+    .orElse("com.example.limbuszhcn").get()

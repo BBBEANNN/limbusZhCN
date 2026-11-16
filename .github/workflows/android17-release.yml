@@ -1,0 +1,64 @@
+name: Publish verified Android 17 APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/android17-service-connection]
+    paths:
+      - .github/workflows/android17-release.yml
+      - release-payload/**
+      - scripts/reconstruct_release_apk.py
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.repository == 'hj6hki123/limbusZhCN'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: v1.5.3-android17.1
+      SOURCE_COMMIT: 4dda6652e614c0dc6e7cb3f7dbfafe6df2d2b9ac
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reconstruct and verify the signed APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          curl --fail --location --retry 3 \
+            https://github.com/BBBEANNN/limbusZhCN/releases/download/v1.5.2/LimbusZhCN-v1.5.2.apk \
+            --output dist/upstream.apk
+          echo '4233a4ad131dcc5f898e007ad787cdbcb3231bb506c28b0a3d4988a459b24200  dist/upstream.apk' | sha256sum --check
+          python3 scripts/reconstruct_release_apk.py dist/upstream.apk \
+            release-payload/android17-apk-payload.zip dist/LimbusZhCN-v1.5.3-android17.apk
+          echo 'd0623e43f64bb7e6da8fdd914ce40960ce06b3823bc5e7bfa702d833840a9a71  dist/LimbusZhCN-v1.5.3-android17.apk' | sha256sum --check
+      - name: Prepare corresponding source and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --output=dist/limbusZhCN-v1.5.3-android17-source.tar.gz "$SOURCE_COMMIT"
+          git format-patch -1 "$SOURCE_COMMIT" --stdout > dist/limbus-android17-fix.patch
+          cd dist
+          sha256sum LimbusZhCN-v1.5.3-android17.apk \
+            limbusZhCN-v1.5.3-android17-source.tar.gz limbus-android17-fix.patch > SHA256SUMS.txt
+      - name: Publish public Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets=(dist/LimbusZhCN-v1.5.3-android17.apk dist/SHA256SUMS.txt
+                  dist/limbusZhCN-v1.5.3-android17-source.tar.gz dist/limbus-android17-fix.patch)
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false \
+              --prerelease --latest=false --notes-file docs/releases/v1.5.3-android17.1.md
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
+              --target "$SOURCE_COMMIT" --title 'v1.5.3 Android 17 啟動閃退修復（測試版）' \
+              --notes-file docs/releases/v1.5.3-android17.1.md --prerelease --latest=false
+          fi

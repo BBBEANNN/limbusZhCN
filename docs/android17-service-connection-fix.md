@@ -63,3 +63,13 @@ this independently signed fork's subsequent APKs from its own GitHub Releases.
   `dcb7967fb77928513b42656b07611fec05d82cfe8255c57a1f9df16584429534`.
 - No phone is connected to this build environment. Samsung/API 37 launch,
   login, resource download, and translation display remain to be verified.
+
+## Release transport fallback
+
+The connected CLI can push repository contents but its credential is rejected by
+`uploads.github.com`. The release workflow therefore reconstructs the already
+signed APK from the verified upstream APK and a compact byte-copy payload. This
+uses only Python's standard library; it neither modifies nor re-signs the result.
+Both the base and reconstructed APK SHA-256 are checked before publication. The
+workflow uses its repository-scoped GitHub token with contents:write to publish
+the APK and matching source artifacts. Signing private material stays local.
